@@ -1,0 +1,24 @@
+# Swift / SPM build artifacts
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# App bundles
+*.app/
+
+# Certificates
+*.p12
+*.cer
+*.mobileprovision
+
+# IDE
+.idea/
+*.swp
+*~
+.vscode/
