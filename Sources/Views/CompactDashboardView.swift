@@ -171,24 +171,8 @@ struct CompactDashboardView: View {
 
     private func floatingWindowCard(_ window: MonitoredWindow) -> some View {
         let isPromptSource = promptMatchesWindow(hookPrompt, window: window)
-        return ZStack(alignment: .topLeading) {
-            // Screenshot fills entire tile
-            if let screenshot = windowManager.screenshots[window.id] {
-                Image(nsImage: screenshot)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-            } else {
-                Color(white: 0.08)
-                    .overlay {
-                        Image(systemName: "terminal")
-                            .font(.title2)
-                            .foregroundStyle(.gray.opacity(0.3))
-                    }
-            }
-
-            // Overlay title bar (semi-transparent)
+        return VStack(spacing: 0) {
+            // Title bar
             HStack(spacing: 4) {
                 if let icon = window.icon {
                     Image(nsImage: icon).resizable().frame(width: 12, height: 12)
@@ -197,17 +181,25 @@ struct CompactDashboardView: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                    .shadow(color: .black, radius: 2)
                 Spacer()
                 if isPromptSource {
                     Circle().fill(.orange).frame(width: 6, height: 6)
                 }
             }
             .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .background(
-                LinearGradient(colors: [.black.opacity(0.7), .clear], startPoint: .top, endPoint: .bottom)
-            )
+            .padding(.vertical, 3)
+            .background(Color(white: 0.12))
+
+            // Screenshot — fit within tile, dark background fills rest
+            ZStack {
+                Color(white: 0.06)
+                if let screenshot = windowManager.screenshots[window.id] {
+                    Image(nsImage: screenshot)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
