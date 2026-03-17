@@ -159,20 +159,29 @@ struct DashboardView: View {
 
     private func promptBanner(_ prompt: RemoteControlService.PromptInfo) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: "lock.shield.fill")
-                .font(.system(size: 18))
-                .foregroundStyle(.blue)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(prompt.description)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(2)
-                if let cwd = prompt.cwd {
-                    Text(URL(fileURLWithPath: cwd).lastPathComponent)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+            // Project badge
+            if let cwd = prompt.cwd {
+                let project = URL(fileURLWithPath: cwd).lastPathComponent
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 10))
+                    Text(project)
+                        .font(.system(size: 11, weight: .bold))
                 }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(.blue)
+                .clipShape(Capsule())
             }
+
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 16))
+                .foregroundStyle(.orange)
+
+            Text(prompt.description)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(2)
 
             Spacer()
 
@@ -192,9 +201,9 @@ struct DashboardView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(.blue.opacity(0.08))
+        .background(.orange.opacity(0.08))
         .overlay(
-            Rectangle().frame(height: 1).foregroundStyle(.blue.opacity(0.2)),
+            Rectangle().frame(height: 1).foregroundStyle(.orange.opacity(0.3)),
             alignment: .bottom
         )
     }
