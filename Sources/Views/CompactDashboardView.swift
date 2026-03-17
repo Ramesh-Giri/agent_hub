@@ -84,29 +84,18 @@ struct CompactDashboardView: View {
                         }
                         .frame(maxHeight: .infinity)
                 } else {
-                    // Google Meet-style: tiles fill all available space
-                    GeometryReader { geo in
-                        let count = visibleWindows.count
-                        let cols = count <= 1 ? 1 : 2
-                        let rows = max(1, Int(ceil(Double(count) / Double(cols))))
-                        let tileW = (geo.size.width - CGFloat(cols + 1) * 4) / CGFloat(cols)
-                        let tileH = (geo.size.height - CGFloat(rows + 1) * 4) / CGFloat(rows)
-
-                        VStack(spacing: 4) {
-                            ForEach(0..<rows, id: \.self) { row in
-                                HStack(spacing: 4) {
-                                    ForEach(0..<cols, id: \.self) { col in
-                                        let idx = row * cols + col
-                                        if idx < count {
-                                            floatingWindowCard(visibleWindows[idx])
-                                                .frame(width: tileW, height: tileH)
-                                        }
-                                    }
-                                }
+                    ScrollView(.vertical, showsIndicators: false) {
+                        let cols = visibleWindows.count == 1
+                            ? [GridItem(.flexible())]
+                            : [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)]
+                        LazyVGrid(columns: cols, spacing: 4) {
+                            ForEach(visibleWindows) { window in
+                                floatingWindowCard(window)
                             }
                         }
                         .padding(4)
                     }
+                    .frame(maxHeight: .infinity)
                 }
 
                 // Input bar
@@ -190,16 +179,19 @@ struct CompactDashboardView: View {
             .padding(.vertical, 3)
             .background(Color(white: 0.12))
 
-            // Screenshot — fit within tile, dark background fills rest
-            ZStack {
+            // Screenshot — natural aspect ratio
+            if let screenshot = windowManager.screenshots[window.id] {
+                Image(nsImage: screenshot)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+            } else {
                 Color(white: 0.06)
-                if let screenshot = windowManager.screenshots[window.id] {
-                    Image(nsImage: screenshot)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                }
+                    .aspectRatio(16/10, contentMode: .fit)
+                    .overlay {
+                        Image(systemName: "terminal").foregroundStyle(.gray.opacity(0.3))
+                    }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
