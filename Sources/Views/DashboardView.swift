@@ -4,6 +4,7 @@ struct DashboardView: View {
     @EnvironmentObject var windowManager: WindowManager
     @State private var showingWindowPicker = false
     @State private var selectedWindow: MonitoredWindow?
+    @State private var commandText = ""
 
     private var attentionCount: Int {
         windowManager.attentionService.attentionWindows.count
@@ -13,12 +14,21 @@ struct DashboardView: View {
         Array(repeating: GridItem(.flexible(), spacing: 12), count: windowManager.gridColumns)
     }
 
+    private var hookPrompt: RemoteControlService.PromptInfo? {
+        windowManager.rcService.activePrompt
+    }
+
     var body: some View {
         ZStack {
             Color(.windowBackgroundColor)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
+                // Permission prompt banner
+                if let prompt = hookPrompt {
+                    promptBanner(prompt)
+                }
+
                 if windowManager.monitoredWindows.isEmpty {
                     emptyState
                         .frame(maxHeight: .infinity)
@@ -36,6 +46,11 @@ struct DashboardView: View {
                         }
                         .padding(16)
                     }
+                }
+
+                // Command input bar
+                if !windowManager.monitoredWindows.isEmpty {
+                    commandBar
                 }
             }
         }
@@ -138,6 +153,112 @@ struct DashboardView: View {
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
         }
+    }
+
+    // MARK: - Permission Prompt Banner
+
+    private func promptBanner(_ prompt: RemoteControlService.PromptInfo) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(prompt.description)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(2)
+                if let cwd = prompt.cwd {
+                    Text(URL(fileURLWithPath: cwd).lastPathComponent)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Button("Allow") {
+                windowManager.rcService.respondToPrompt(allow: true)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+            .controlSize(.regular)
+
+            Button("Deny") {
+                windowManager.rcService.respondToPrompt(allow: false)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .controlSize(.regular)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.blue.opacity(0.08))
+        .overlay(
+            Rectangle().frame(height: 1).foregroundStyle(.blue.opacity(0.2)),
+            alignment: .bottom
+        )
+    }
+
+    // MARK: - Command Bar
+
+    private var commandBar: some View {
+        HStack(spacing: 10) {
+            // Target window indicator
+            if let window = selectedWindow ?? windowManager.monitoredWindows.first,
+               let icon = window.icon {
+                Image(nsImage: icon).resizable().frame(width: 16, height: 16)
+                Text(window.ownerName)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            TextField("Send command to terminal...", text: $commandText)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { sendCommand() }
+
+            Button("Send") { sendCommand() }
+                .buttonStyle(.borderedProminent)
+                .disabled(commandText.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private func sendCommand() {
+        let text = commandText.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return }
+        guard let window = selectedWindow ?? windowManager.monitoredWindows.first else { return }
+        commandText = ""
+
+        let pid = findPID(for: window)
+        windowManager.bringWindowToFront(window)
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+            let utf16 = Array(text.utf16)
+            for i in stride(from: 0, to: utf16.count, by: 20) {
+                let end = min(i + 20, utf16.count)
+                var chunk = Array(utf16[i..<end])
+                let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: true)
+                down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
+                if let pid { down?.postToPid(pid) } else { down?.post(tap: .cghidEventTap) }
+                let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: false)
+                if let pid { up?.postToPid(pid) } else { up?.post(tap: .cghidEventTap) }
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+            let enterDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: true)
+            if let pid { enterDown?.postToPid(pid) } else { enterDown?.post(tap: .cghidEventTap) }
+            let enterUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: false)
+            if let pid { enterUp?.postToPid(pid) } else { enterUp?.post(tap: .cghidEventTap) }
+        }
+    }
+
+    private func findPID(for window: MonitoredWindow) -> pid_t? {
+        NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == window.bundleIdentifier ||
+            $0.localizedName == window.ownerName
+        }?.processIdentifier
     }
 
     private var gridColumnControl: some View {
