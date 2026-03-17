@@ -294,38 +294,13 @@ struct CompactDashboardView: View {
             HStack(spacing: 8) {
                 TapButton(
                     label: "Allow",
-                    action: {
-                        // Send "1" + Enter to the window that triggered the prompt
-                        if let cwd = prompt.cwd,
-                           let target = windowManager.monitoredWindows.first(where: {
-                               $0.windowTitle.localizedCaseInsensitiveContains(
-                                   URL(fileURLWithPath: cwd).lastPathComponent
-                               )
-                           }) {
-                            sendKeystrokeToWindow("1\r", window: target)
-                        } else {
-                            sendKeystroke("1\r")
-                        }
-                        windowManager.rcService.activePrompt = nil
-                    },
+                    action: { windowManager.rcService.respondToPrompt(allow: true) },
                     color: .white, bgColor: .green.opacity(0.7),
                     font: .system(size: 12, weight: .bold)
                 )
                 TapButton(
                     label: "Deny",
-                    action: {
-                        if let cwd = prompt.cwd,
-                           let target = windowManager.monitoredWindows.first(where: {
-                               $0.windowTitle.localizedCaseInsensitiveContains(
-                                   URL(fileURLWithPath: cwd).lastPathComponent
-                               )
-                           }) {
-                            sendKeystrokeToWindow("3\r", window: target)
-                        } else {
-                            sendKeystroke("3\r")
-                        }
-                        windowManager.rcService.activePrompt = nil
-                    },
+                    action: { windowManager.rcService.respondToPrompt(allow: false) },
                     color: .white, bgColor: .red.opacity(0.7),
                     font: .system(size: 12, weight: .bold)
                 )
