@@ -17,6 +17,13 @@ struct AgentHubApp: App {
                     if !CGPreflightScreenCaptureAccess() || !AXIsProcessTrusted() {
                         showPermissionSetup = true
                     }
+                    // Clean up presence file on quit so hooks fall through to normal Claude Code
+                    NotificationCenter.default.addObserver(
+                        forName: NSApplication.willTerminateNotification,
+                        object: nil, queue: .main
+                    ) { _ in
+                        windowManager.rcService.stop()
+                    }
                 }
                 .sheet(isPresented: $showPermissionSetup) {
                     PermissionSetupView()

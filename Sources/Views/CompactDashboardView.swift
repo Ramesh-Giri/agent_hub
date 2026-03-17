@@ -31,6 +31,30 @@ struct CompactDashboardView: View {
         windowManager.rcService.activePrompt
     }
 
+    /// Windows to show in the floating panel — exclude the frontmost one
+    private var visibleWindows: [MonitoredWindow] {
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        return windowManager.monitoredWindows.filter { window in
+            // Hide windows belonging to the frontmost app
+            if let frontBundleID = frontApp?.bundleIdentifier,
+               let windowBundleID = window.bundleIdentifier,
+               frontBundleID == windowBundleID {
+                // Same app — check if this specific window title matches the frontmost
+                // For multi-window apps like VS Code, only hide the active instance
+                if let frontName = frontApp?.localizedName,
+                   window.ownerName == frontName {
+                    // If only one window from this app, hide it
+                    let sameAppWindows = windowManager.monitoredWindows.filter { $0.bundleIdentifier == windowBundleID }
+                    if sameAppWindows.count <= 1 { return false }
+                    // Multiple windows — show all (we can't tell which is focused)
+                    return true
+                }
+                return false
+            }
+            return true
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if isMinimized {
@@ -44,14 +68,16 @@ struct CompactDashboardView: View {
                 }
 
                 // Window grid
-                if windowManager.monitoredWindows.isEmpty {
+                if visibleWindows.isEmpty {
                     Color(white: 0.05)
                         .overlay {
                             VStack(spacing: 8) {
                                 Image(systemName: "display")
                                     .font(.system(size: 28))
                                     .foregroundStyle(.gray.opacity(0.4))
-                                Text("No windows detected")
+                                Text(windowManager.monitoredWindows.isEmpty
+                                     ? "No windows detected"
+                                     : "All windows in foreground")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.gray.opacity(0.5))
                             }
@@ -59,11 +85,11 @@ struct CompactDashboardView: View {
                         .frame(maxHeight: .infinity)
                 } else {
                     ScrollView(.vertical, showsIndicators: false) {
-                        let cols = windowManager.monitoredWindows.count == 1
+                        let cols = visibleWindows.count == 1
                             ? [GridItem(.flexible())]
                             : [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)]
                         LazyVGrid(columns: cols, spacing: 4) {
-                            ForEach(windowManager.monitoredWindows) { window in
+                            ForEach(visibleWindows) { window in
                                 floatingWindowCard(window)
                             }
                         }
