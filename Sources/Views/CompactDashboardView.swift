@@ -10,7 +10,6 @@ struct CompactDashboardView: View {
     @State private var isMinimized = false
     @State private var messageText = ""
     @State private var selectedWindowID: CGWindowID?
-    @State private var showScreenView = true
 
     private var selectedWindow: MonitoredWindow? {
         let windows = windowManager.monitoredWindows
@@ -39,29 +38,41 @@ struct CompactDashboardView: View {
             } else {
                 topBar
 
-                // Main content area
-                if showScreenView {
-                    // Screen share mode: screenshot + action buttons overlay
-                    ZStack(alignment: .bottom) {
-                        screenView
+                // Prompt overlay
+                if let prompt = hookPrompt {
+                    actionOverlay(prompt)
+                }
 
-                        if let prompt = hookPrompt {
-                            actionOverlay(prompt)
+                // Window grid
+                if windowManager.monitoredWindows.isEmpty {
+                    Color(white: 0.05)
+                        .overlay {
+                            VStack(spacing: 8) {
+                                Image(systemName: "display")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.gray.opacity(0.4))
+                                Text("No windows detected")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.gray.opacity(0.5))
+                            }
                         }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(maxHeight: .infinity)
                 } else {
-                    // Terminal output mode
-                    terminalOutputView
+                    ScrollView(.vertical, showsIndicators: false) {
+                        let cols = windowManager.monitoredWindows.count == 1
+                            ? [GridItem(.flexible())]
+                            : [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)]
+                        LazyVGrid(columns: cols, spacing: 4) {
+                            ForEach(windowManager.monitoredWindows) { window in
+                                floatingWindowCard(window)
+                            }
+                        }
+                        .padding(4)
+                    }
                 }
 
-                // Input bar (always visible)
+                // Input bar
                 inputBar
-
-                // Window tabs
-                if windowManager.monitoredWindows.count > 1 {
-                    windowTabs
-                }
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -101,13 +112,6 @@ struct CompactDashboardView: View {
 
             Spacer()
 
-            // Toggle screen/terminal view
-            TapIconButton(
-                systemName: showScreenView ? "terminal" : "display",
-                action: { showScreenView.toggle() },
-                color: .white.opacity(0.7)
-            )
-
             TapIconButton(
                 systemName: "chevron.down.2",
                 action: { isMinimized = true; onMinimize?() },
@@ -125,59 +129,60 @@ struct CompactDashboardView: View {
         .background(Color(white: 0.12))
     }
 
-    // MARK: - Terminal Output View
+    // MARK: - Window Card (for floating grid)
 
-    private var terminalOutputView: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: true) {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(terminal.recentLines.enumerated()), id: \.offset) { idx, line in
-                        Text(line)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id(idx)
-                    }
+    private func floatingWindowCard(_ window: MonitoredWindow) -> some View {
+        let isPromptSource = promptMatchesWindow(hookPrompt, window: window)
+        return VStack(spacing: 0) {
+            // Title bar
+            HStack(spacing: 4) {
+                if let icon = window.icon {
+                    Image(nsImage: icon).resizable().frame(width: 12, height: 12)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-            }
-            .background(Color(white: 0.05))
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onChange(of: terminal.recentLines.count) { _, newCount in
-                withAnimation {
-                    proxy.scrollTo(newCount - 1, anchor: .bottom)
+                Text(window.displayName)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Spacer()
+                if isPromptSource {
+                    Circle().fill(.orange).frame(width: 6, height: 6)
                 }
             }
-        }
-    }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(Color(white: 0.15))
 
-    // MARK: - Screen View
-
-    private var screenView: some View {
-        Group {
-            if let window = selectedWindow, let screenshot = windowManager.screenshots[window.id] {
+            // Screenshot
+            if let screenshot = windowManager.screenshots[window.id] {
                 Image(nsImage: screenshot)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.black)
-                    .contentShape(Rectangle())
-                    .onTapGesture { windowManager.bringWindowToFront(window) }
+                    .frame(maxWidth: .infinity)
             } else {
-                Color(white: 0.05)
+                Color(white: 0.08)
+                    .aspectRatio(16/10, contentMode: .fit)
                     .overlay {
-                        VStack(spacing: 10) {
-                            Image(systemName: "display")
-                                .font(.system(size: 32))
-                                .foregroundStyle(.gray.opacity(0.4))
-                            Text("No screen to share")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.gray.opacity(0.5))
-                        }
+                        Image(systemName: "terminal").foregroundStyle(.gray.opacity(0.3))
                     }
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isPromptSource ? .orange : .white.opacity(0.1), lineWidth: isPromptSource ? 2 : 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedWindowID = window.id
+            windowManager.bringWindowToFront(window)
+        }
+    }
+
+    private func promptMatchesWindow(_ prompt: RemoteControlService.PromptInfo?, window: MonitoredWindow) -> Bool {
+        guard let cwd = prompt?.cwd else { return false }
+        let project = URL(fileURLWithPath: cwd).lastPathComponent
+        return window.windowTitle.localizedCaseInsensitiveContains(project) ||
+               window.displayName.localizedCaseInsensitiveContains(project)
     }
 
     // MARK: - Action Overlay (dynamic buttons from hook-detected prompts)
@@ -317,33 +322,6 @@ struct CompactDashboardView: View {
     }
 
     // MARK: - Window Tabs
-
-    private var windowTabs: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(windowManager.monitoredWindows) { window in
-                    HStack(spacing: 4) {
-                        if let icon = window.icon {
-                            Image(nsImage: icon).resizable().frame(width: 12, height: 12)
-                        }
-                        Text(window.ownerName)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.8))
-                            .lineLimit(1)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(selectedWindow?.id == window.id ? Color.white.opacity(0.15) : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .contentShape(Rectangle())
-                    .onTapGesture { selectedWindowID = window.id }
-                }
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-        }
-        .background(Color(white: 0.08))
-    }
 
     // MARK: - Minimized Pill
 
