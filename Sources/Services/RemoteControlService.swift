@@ -202,21 +202,63 @@ final class RemoteControlService: ObservableObject {
       // Only intercept in modes that show permission dialogs
       if (!['default', 'plan'].includes(mode)) process.exit(0);
 
-      // Only for tools that typically need permission
-      if (!['Bash', 'Write', 'Edit'].includes(data.tool_name || '')) process.exit(0);
+      const tool = data.tool_name || '';
+      if (!['Bash', 'Write', 'Edit'].includes(tool)) process.exit(0);
 
-      // Write prompt file for AgentHub (non-blocking notification)
+      // Check if already allowed by settings (skip if so)
+      const home = process.env.HOME;
+      const toolInput = data.tool_input || {};
+      const cmd = toolInput.command || '';
+      const filePath = toolInput.file_path || '';
+      let allowRules = [];
+      try { allowRules = JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8'))?.permissions?.allow || []; } catch {}
+      try {
+        const local = JSON.parse(fs.readFileSync(process.cwd() + '/.claude/settings.local.json', 'utf8'));
+        allowRules = [...allowRules, ...(local?.permissions?.allow || [])];
+      } catch {}
+      for (const r of allowRules) {
+        if (typeof r !== 'string') continue;
+        if (r === tool) process.exit(0);
+        if (r.startsWith(tool + ':')) {
+          const p = r.slice(tool.length + 1);
+          if (cmd && cmd.includes(p)) process.exit(0);
+          if (filePath && filePath.includes(p)) process.exit(0);
+        }
+      }
+
+      // This tool needs permission — block and wait for AgentHub
       const uuid = crypto.randomUUID();
+      const promptFile = tmpDir + '/agenthub-prompt-' + uuid + '.json';
+      const responseFile = tmpDir + '/agenthub-response-' + uuid + '.json';
       data._cwd = process.cwd();
       data._uuid = uuid;
-      fs.writeFileSync(
-        tmpDir + '/agenthub-prompt-' + uuid + '.json',
-        JSON.stringify(data, null, 2)
-      );
+      fs.writeFileSync(promptFile, JSON.stringify(data, null, 2));
 
-      // Exit immediately — Claude Code shows its normal prompt
-      // User responds from floating panel via CGEvent or from terminal directly
-      process.exit(0);
+      const start = Date.now();
+      const poll = () => {
+        try {
+          if (fs.existsSync(responseFile)) {
+            const raw = fs.readFileSync(responseFile, 'utf8');
+            try { fs.unlinkSync(responseFile); } catch {}
+            try { fs.unlinkSync(promptFile); } catch {}
+            const resp = JSON.parse(raw);
+            process.stdout.write(JSON.stringify({
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: resp.allow ? 'allow' : 'deny',
+                permissionDecisionReason: resp.allow ? 'Allowed from AgentHub' : 'Denied from AgentHub'
+              }
+            }));
+            process.exit(0);
+          }
+        } catch(e) {}
+        if (Date.now() - start > 120000) {
+          try { fs.unlinkSync(promptFile); } catch {}
+          process.exit(0);
+        }
+        setTimeout(poll, 200);
+      };
+      poll();
     } catch(e) {
       process.exit(0);
     }

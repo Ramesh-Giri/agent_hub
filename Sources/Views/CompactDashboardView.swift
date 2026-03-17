@@ -263,6 +263,20 @@ struct CompactDashboardView: View {
 
     private func actionOverlay(_ prompt: RemoteControlService.PromptInfo) -> some View {
         VStack(spacing: 8) {
+            // Show which project triggered the prompt
+            if let cwd = prompt.cwd {
+                let source = URL(fileURLWithPath: cwd).lastPathComponent
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.fill").font(.system(size: 9))
+                    Text(source).font(.system(size: 10, weight: .bold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(.blue)
+                .clipShape(Capsule())
+            }
+
             Text(prompt.description)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white)
@@ -325,11 +339,13 @@ struct CompactDashboardView: View {
         return .blue.opacity(0.6)
     }
 
-    /// Send a keystroke to a specific window
+    /// Send a keystroke to a specific window — brings it to front, types, then restores
     private func sendKeystrokeToWindow(_ text: String, window: MonitoredWindow) {
-        let pid = Self.findPID(for: window)
+        // Bring the TARGET window to front
         windowManager.bringWindowToFront(window)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) {
+            let pid = Self.findPID(for: window)
             let utf16 = Array(text.utf16)
             for i in stride(from: 0, to: utf16.count, by: 20) {
                 let end = min(i + 20, utf16.count)

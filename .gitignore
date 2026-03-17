@@ -17,7 +17,7 @@ DerivedData/
 *.p12
 *.cer
 *.mobileprovision
-
+i
 # IDE
 .idea/
 *.swp
