@@ -391,9 +391,11 @@ struct CompactDashboardView: View {
         .background(Color(white: 0.1))
     }
 
-    /// Target for commands: the frontmost monitored window (what user is working in)
+    /// Target for commands: the window shown in the floating panel (background one)
+    /// The user is already typing in the frontmost window — floating panel targets the OTHER window
     private var commandTarget: MonitoredWindow? {
-        frontmostMonitoredWindow ?? selectedWindow
+        if let id = selectedWindowID, let w = visibleWindows.first(where: { $0.id == id }) { return w }
+        return visibleWindows.first ?? windowManager.monitoredWindows.first
     }
 
     private func sendMessage() {
