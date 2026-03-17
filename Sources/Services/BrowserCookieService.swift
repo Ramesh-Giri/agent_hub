@@ -9,8 +9,23 @@ struct BrowserCookieService {
 
     private static var cachedCookies: [HTTPCookie]?
     private static let cacheFile = FileManager.default.temporaryDirectory.appendingPathComponent("agenthub-cookies.json")
+    private static let logFile = FileManager.default.temporaryDirectory.appendingPathComponent("agenthub-cookies.log")
+
+    private static func log(_ msg: String) {
+        let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
+        let path = logFile.path
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile()
+            fh.write(line.data(using: .utf8) ?? Data())
+            fh.closeFile()
+        }
+    }
 
     static func injectBrowserCookies(into webView: WKWebView, for domain: String, completion: @escaping () -> Void) {
+        log("injectBrowserCookies called for \(domain)")
         DispatchQueue.global().async {
             // Use cached cookies if available (avoid Keychain prompt)
             let cookies: [HTTPCookie]
@@ -121,6 +136,7 @@ struct BrowserCookieService {
             params: ["%\(domain)%"]
         )
 
+        log("Found \(rows.count) rows for \(domain)")
         var cookies: [HTTPCookie] = []
         for row in rows {
             guard let name = row["name"] as? String,
@@ -159,12 +175,14 @@ struct BrowserCookieService {
                 cookies.append(cookie)
             }
         }
+        log("Decrypted \(cookies.count) cookies for \(domain)")
         return cookies
     }
 
     // MARK: - Keychain
 
     private static func getKeychainPassword(service: String) -> Data? {
+        // Try Security framework first
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -173,8 +191,34 @@ struct BrowserCookieService {
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return data
+        if status == errSecSuccess, let data = result as? Data {
+            log("Got keychain key via Security framework (\(data.count) bytes)")
+            return data
+        }
+        log("Security framework failed (status=\(status)), trying shell")
+
+        // Fallback: use `security` CLI (may not prompt if already allowed)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        proc.arguments = ["find-generic-password", "-s", service, "-w"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            let output = pipe.fileHandleForReading.readDataToEndOfFile()
+            if proc.terminationStatus == 0, !output.isEmpty {
+                // Trim trailing newline
+                let trimmed = String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let key = trimmed?.data(using: .utf8) {
+                    log("Got keychain key via CLI (\(key.count) bytes)")
+                    return key
+                }
+            }
+        } catch {}
+        log("All keychain methods failed for \(service)")
+        return nil
     }
 
     // MARK: - Crypto

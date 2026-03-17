@@ -27,7 +27,9 @@ final class SharedRCWebView: ObservableObject {
         self.webView = wv
         delegate.owner = self
 
+        try? "SharedRCWebView init called\n".write(toFile: "/tmp/agenthub-cookies.log", atomically: true, encoding: .utf8)
         BrowserCookieService.injectBrowserCookies(into: wv, for: "claude.ai") {
+            NSLog("[AgentHub] Cookies injected — loading URL")
             wv.load(URLRequest(url: Self.rcURL))
         }
     }
@@ -280,7 +282,7 @@ class RCWebViewDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
 
 struct CompactDashboardView: View {
     @EnvironmentObject var windowManager: WindowManager
-    @ObservedObject var rc = SharedRCWebView.shared
+    @StateObject var rc = SharedRCWebView.shared
     let onExpand: () -> Void
     var onMinimize: (() -> Void)? = nil
     var onRestore: (() -> Void)? = nil

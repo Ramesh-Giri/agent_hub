@@ -53,6 +53,10 @@ final class WindowManager: ObservableObject {
         rcService.start()
         RemoteControlService.cleanupOldHook()
 
+        // Initialize the RC web view early so cookies load before the panel appears
+        try? "setup called".write(toFile: "/tmp/agenthub-setup.log", atomically: true, encoding: .utf8)
+        let _ = SharedRCWebView.shared
+
         // Start speech + network
         speechService.requestPermission()
         networkServer.start()
