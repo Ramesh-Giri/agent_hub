@@ -84,18 +84,14 @@ struct CompactDashboardView: View {
                         }
                         .frame(maxHeight: .infinity)
                 } else {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        let cols = visibleWindows.count == 1
-                            ? [GridItem(.flexible())]
-                            : [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)]
-                        LazyVGrid(columns: cols, spacing: 4) {
-                            ForEach(visibleWindows) { window in
-                                floatingWindowCard(window)
-                            }
+                    // Stack windows vertically — each takes equal share of space
+                    VStack(spacing: 4) {
+                        ForEach(visibleWindows) { window in
+                            floatingWindowCard(window)
+                                .frame(maxHeight: .infinity)
                         }
-                        .padding(4)
                     }
-                    .frame(maxHeight: .infinity)
+                    .padding(4)
                 }
 
                 // Input bar
