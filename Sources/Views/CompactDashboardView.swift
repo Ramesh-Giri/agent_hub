@@ -17,13 +17,16 @@ struct CompactDashboardView: View {
         return windows.first
     }
 
+    /// Show the project name of the frontmost window (what the user is working on)
     private var projectName: String {
-        guard let window = selectedWindow else { return "AgentHub" }
-        let title = window.windowTitle
-        if let lastDash = title.range(of: " — ", options: .backwards) {
-            return String(title[lastDash.upperBound...])
+        if let front = frontmostMonitoredWindow {
+            let title = front.windowTitle
+            if let lastDash = title.range(of: " — ", options: .backwards) {
+                return String(title[lastDash.upperBound...])
+            }
+            return !title.isEmpty ? title : front.ownerName
         }
-        return !title.isEmpty ? title : window.ownerName
+        return "AgentHub"
     }
 
     /// Active prompt from the hook system
@@ -31,38 +34,35 @@ struct CompactDashboardView: View {
         windowManager.rcService.activePrompt
     }
 
-    /// Find the frontmost monitored window by matching CGWindowList titles
+    /// Find the frontmost monitored window by checking ALL on-screen windows in z-order.
+    /// The floating panel is non-activating, so the frontmost app might still be AgentHub.
+    /// Instead, scan the window list in z-order and find the topmost MONITORED window.
     private var frontmostMonitoredWindow: MonitoredWindow? {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
-        let pid = frontApp.processIdentifier
         guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
 
-        // Get the topmost window title from the frontmost app
+        let monitoredIDs = Set(windowManager.monitoredWindows.map(\.id))
+        let myPID = ProcessInfo.processInfo.processIdentifier
+
         for info in windowList {
             guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
-                  ownerPID == pid,
+                  ownerPID != myPID, // Skip our own windows
                   let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
-                  let title = info[kCGWindowName as String] as? String, !title.isEmpty,
+                  let windowID = info[kCGWindowNumber as String] as? CGWindowID,
                   let bounds = info[kCGWindowBounds as String] as? [String: Any],
                   let w = bounds["Width"] as? CGFloat, w > 200
             else { continue }
 
-            // Match by window ID first
-            if let windowID = info[kCGWindowNumber as String] as? CGWindowID,
-               let match = windowManager.monitoredWindows.first(where: { $0.id == windowID }) {
-                return match
+            // Direct ID match
+            if monitoredIDs.contains(windowID) {
+                return windowManager.monitoredWindows.first { $0.id == windowID }
             }
-            // Match by title
-            if let match = windowManager.monitoredWindows.first(where: { $0.windowTitle == title }) {
-                return match
+
+            // Title match (window IDs may have changed since discovery)
+            if let title = info[kCGWindowName as String] as? String, !title.isEmpty {
+                if let match = windowManager.monitoredWindows.first(where: { $0.windowTitle == title }) {
+                    return match
+                }
             }
-            // Partial title match
-            if let match = windowManager.monitoredWindows.first(where: {
-                title.contains($0.windowTitle) || $0.windowTitle.contains(title)
-            }) {
-                return match
-            }
-            break
         }
         return nil
     }
