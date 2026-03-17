@@ -1,17 +1,38 @@
 # AgentHub
 
-A macOS dashboard for monitoring multiple AI agent windows (Claude Code, ChatGPT, Cursor, VS Code, terminals). See live screenshots, get notified when agents need input, and control Claude Code sessions via Remote Control — all from a floating overlay.
+A macOS app for monitoring and controlling multiple Claude Code sessions from a single floating overlay. See live screenshots of your agent windows, respond to permission prompts without switching apps, and send commands to background terminals.
 
-## Features
+## What It Does
 
-- **Window Monitoring** — Discover and track AI agent/terminal windows with live screenshot thumbnails
-- **Floating Panel** — Always-on-top overlay that appears when you switch apps, embedding claude.ai/code as a full Remote Control browser for connected Claude Code sessions
-- **Attention Detection** — Title-based monitoring detects when window titles contain prompt patterns like `(y/n)`, `Continue?`
-- **Idle Detection** — Flags pure terminal apps (iTerm, Terminal, Warp) that haven't changed for 20+ seconds
-- **macOS Notifications** — System notifications with actionable buttons when agents wait for input
-- **iOS Companion** — Bonjour TCP server broadcasts window list with screenshots to an iOS app
-- **Voice Commands** — On-device speech recognition for hands-free input
-- **Claude-mem Integration** — Pulls context from claude-mem service for enriched window information
+When you run multiple Claude Code sessions across different projects, AgentHub lets you:
+
+- **See all sessions at once** — Live screenshots in a grid, auto-discovered
+- **Respond to permission prompts remotely** — Allow/Deny buttons appear on the floating panel when a background session needs permission, without leaving your current work
+- **Send commands to background terminals** — Type in the floating panel, keystrokes go to the correct VS Code window
+- **Smart window filtering** — Only shows windows you're NOT looking at. The frontmost window is hidden from the panel
+
+## How It Works
+
+### Permission Prompts (Blocking Hook)
+
+AgentHub installs a Claude Code PreToolUse hook that:
+- **Blocks** when a background project needs permission (you can't see the terminal)
+- **Shows Allow/Deny** on the floating panel with the project name
+- **Responds directly** via file-based IPC — no keystroke injection for permission responses
+- **Passes through** when the project is in the foreground (you can see and respond in the terminal)
+- **Passes through** when AgentHub isn't running (normal Claude Code behavior)
+
+### Floating Panel
+
+Appears automatically when you switch away from the app. Shows:
+- Adaptive grid of background terminal windows (vertical/horizontal based on panel size)
+- Permission prompt banner with project badge
+- Command input bar for sending text to background terminals
+- Minimize to pill / expand to full app
+
+### Command Sending
+
+Text from the input bar is sent via CGEvent keystrokes (20 chars per event) to the target VS Code window, raised via Accessibility API.
 
 ## Prerequisites
 
@@ -19,26 +40,9 @@ A macOS dashboard for monitoring multiple AI agent windows (Claude Code, ChatGPT
 |---|---|---|
 | **macOS** | 14.0+ (Sonoma) | Required for APIs used |
 | **Swift** | 5.9+ | Comes with Xcode 15+ |
-| **Xcode Command Line Tools** | Latest | `xcode-select --install` |
-| **OpenSSL** | Any | Pre-installed on macOS, used for code signing cert |
-| **Claude Code** | 2.1.51+ | Required for floating panel Remote Control. `claude --version` to check |
+| **Xcode CLT** | Latest | `xcode-select --install` |
 
-## macOS Permissions Required
-
-Grant these via System Settings > Privacy & Security:
-
-| Permission | Purpose | Required? |
-|---|---|---|
-| **Screen Recording** | Live window screenshots | Yes |
-| **Accessibility** | Bring agent windows to front | Yes |
-| **Notifications** | Alert when agents need input | Recommended |
-| **Microphone** | Voice command input | Optional |
-| **Speech Recognition** | Convert voice to text | Optional |
-| **Local Network** | iOS companion app via Bonjour | Optional |
-
-## Setup & Installation
-
-### 1. Build and install
+## Setup
 
 ```bash
 git clone <repo-url>
@@ -47,132 +51,57 @@ chmod +x build-and-run.sh
 ./build-and-run.sh --install
 ```
 
-This automatically:
-- Creates a self-signed code signing certificate (`AgentHub Dev`) on first run
-- Builds with `swift build`
-- Creates an `.app` bundle with proper Info.plist
-- Signs with stable identity (permissions persist across rebuilds)
-- Installs to `/Applications/AgentHub.app` and launches
+Grant permissions on first launch:
+1. **Screen Recording** — System Settings > Privacy & Security > Screen Recording
+2. **Accessibility** — System Settings > Privacy & Security > Accessibility
 
-> **First run:** You may see a keychain dialog — click "Always Allow".
-
-### 2. Grant permissions
-
-On first launch, grant:
-1. **Screen Recording** — Add AgentHub in System Settings, then **relaunch**
-2. **Accessibility** — Add AgentHub in System Settings
-
-### 3. Enable Claude Remote Control (required)
-
-The floating panel is a Remote Control browser — it needs this enabled. Add to `~/.claude/settings.json`:
-
-```json
-{
-  "enableRemoteControl": true
-}
-```
-
-Or run `/config` inside any Claude Code session and toggle "Enable Remote Control for all sessions".
-
-After enabling, new Claude Code sessions automatically register at claude.ai/code and appear in the floating panel.
-
-## Usage
-
-### Adding Windows
-
-1. Click **"Add Windows"** (+ button) in the toolbar
-2. Select terminal/agent windows to monitor
-3. Click "Add Selected"
-
-### Floating Panel
-
-When you switch to another app, the main window hides and a floating overlay appears showing claude.ai/code — a full Remote Control browser for your connected Claude Code sessions. All input and interaction goes through Claude's Remote Control protocol directly in the web view.
-
-Click the expand arrow to restore the full app. Cmd+Tab or dock click also restores it.
-
-### Attention Detection
-
-AgentHub watches window titles for prompt patterns:
-- `(y/n)`, `[Y/n]`, `(yes/no)` — prompt patterns in window titles
-- `Continue?`, `Proceed?`, `Confirm?` — question prompts
-- `Error:`, `FAILED`, `Build failed` — error patterns
-
-When detected:
-- Orange attention badge on the window card
-- macOS notification with the prompt text
-- Notification action buttons for quick response
-
-### Interacting with Agents
-
-The floating panel embeds claude.ai/code directly — interact with all connected Claude Code sessions through the Remote Control web UI. No keystroke injection or clipboard needed.
-
-From the main dashboard, click a window card to bring the agent window to front.
+AgentHub automatically:
+- Sets `enableRemoteControl: true` in `~/.claude/settings.json`
+- Installs the PreToolUse hook in `~/.claude/hooks/agenthub-prompt.js`
+- Creates a presence marker (`/tmp/agenthub-active`) while running
 
 ## Project Structure
 
 ```
 AgentHub/
 ├── Sources/
-│   ├── AgentHubApp.swift               # App entry point
+│   ├── AgentHubApp.swift                  # App entry, lifecycle
 │   ├── Models/
-│   │   ├── WindowManager.swift         # Central state manager
-│   │   ├── MonitoredWindow.swift       # Window data models
-│   │   └── AppCatalog.swift            # Known AI/dev app registry (50+ apps)
+│   │   ├── WindowManager.swift            # Central state (all services, monitoring loops)
+│   │   ├── MonitoredWindow.swift          # Window data models
+│   │   └── AppCatalog.swift               # 50+ known AI/dev app registry
 │   ├── Views/
-│   │   ├── DashboardView.swift         # Main grid view
-│   │   ├── CompactDashboardView.swift  # Floating panel (RC browser + expand button)
-│   │   ├── WindowThumbnailView.swift   # Window card with screenshot
-│   │   ├── WindowPickerView.swift      # Window selection sheet
-│   │   ├── InteractionSheet.swift      # Window details modal
-│   │   ├── SettingsView.swift          # App settings
-│   │   ├── PermissionSetupView.swift   # First-run permission guide
-│   │   ├── RemoteControlWebView.swift  # Claude remote control (WKWebView + session management)
-│   │   └── TapButton.swift            # Gesture-based button for floating panels
+│   │   ├── CompactDashboardView.swift     # Floating panel (grid, prompts, input bar)
+│   │   ├── DashboardView.swift            # Main window (grid, toolbar, prompts, input bar)
+│   │   ├── PanelTextField.swift           # NSTextField for non-activating panels
+│   │   ├── TapButton.swift                # Gesture-based button for panels
+│   │   ├── WindowThumbnailView.swift      # Window card with screenshot
+│   │   ├── WindowPickerView.swift         # Window selection sheet
+│   │   ├── SettingsView.swift             # App settings
+│   │   └── PermissionSetupView.swift      # First-run permission guide
 │   └── Services/
-│       ├── WindowDiscoveryService.swift    # CGWindowList discovery + Electron dedup
-│       ├── WindowInteractionService.swift  # Bring windows to front (Accessibility API)
-│       ├── ContentSharingManager.swift     # Screenshot capture (CGWindowListCreateImage)
-│       ├── AttentionDetectionService.swift # Title + idle detection, notifications
-│       ├── FloatingPanelManager.swift      # Always-on-top floating panel
-│       ├── NetworkServer.swift             # Bonjour TCP server for iOS
-│       ├── SpeechService.swift             # On-device speech recognition
-│       └── ClaudeMemService.swift          # claude-mem integration
+│       ├── RemoteControlService.swift     # Hook install, prompt watching, response
+│       ├── WindowDiscoveryService.swift   # CGWindowList discovery + dedup
+│       ├── WindowInteractionService.swift # AXUIElement window management
+│       ├── AttentionDetectionService.swift # Title/idle detection, notifications
+│       ├── FloatingPanelManager.swift     # NSPanel lifecycle
+│       ├── ContentSharingManager.swift    # Screenshot capture
+│       ├── BrowserCookieService.swift     # Arc/Chrome cookie decryption (future use)
+│       ├── TerminalBridgeService.swift    # ttyd WebSocket client (future use)
+│       ├── NetworkServer.swift            # Bonjour TCP for iOS
+│       └── SpeechService.swift            # Speech recognition
 ├── build-and-run.sh          # Build, sign, install, launch
-├── Package.swift             # SPM configuration (no external deps)
-├── Info.plist                # App metadata
-└── AgentHub.entitlements     # App sandbox disabled
+├── Package.swift              # SPM config (no external deps, links sqlite3)
+├── Info.plist                 # App metadata
+└── AgentHub.entitlements      # App sandbox disabled
 ```
 
-## Development
+## Known Issues
 
-```bash
-# Debug build only
-swift build
-
-# Build + launch from build dir
-./build-and-run.sh
-
-# Build + install to /Applications + launch
-./build-and-run.sh --install
-```
-
-### Code Signing
-
-The build script creates a self-signed `AgentHub Dev` certificate in your login keychain. This ensures TCC permissions persist across rebuilds. Verify:
-```bash
-security find-identity -v -p codesigning | grep "AgentHub Dev"
-```
-
-## Known Limitations
-
-- **Electron ghost windows** — VS Code/Cursor create extra CG windows. AgentHub deduplicates by PID + title but edge cases exist.
-- **Google OAuth** in embedded web view is blocked — redirects to default browser for login.
-- **Title-based detection** only works when prompt patterns appear in the window title, not terminal content.
+1. **CGEvent multi-window targeting** — When sending commands to a specific VS Code window among multiple, the keystroke may go to the wrong one. Both windows share the same PID.
+2. **Hook allow-rule matching** — Can't fully replicate Claude Code's permission logic. Some auto-allowed tools may still trigger the blocking hook.
+3. **1s frontmost tracking delay** — The frontmost project file updates every second, causing a brief window where the hook may incorrectly block.
 
 ## Tech Stack
 
-Swift 5.9 / SwiftUI / AppKit / WebKit / UserNotifications / Network.framework / Speech / AVFoundation
-
-## License
-
-MIT
+Swift 5.9 / SwiftUI / AppKit / CommonCrypto / SQLite3 / UserNotifications / Network.framework / Speech / AVFoundation

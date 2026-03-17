@@ -205,6 +205,14 @@ final class RemoteControlService: ObservableObject {
       const tool = data.tool_name || '';
       if (!['Bash', 'Write', 'Edit'].includes(tool)) process.exit(0);
 
+      // If this project is the one user is looking at, don't block — let Claude Code show its own dialog
+      try {
+        const frontProject = fs.readFileSync(tmpDir + '/agenthub-frontmost.txt', 'utf8').trim();
+        const cwd = process.cwd();
+        const projectName = cwd.split('/').pop();
+        if (frontProject && projectName && frontProject === projectName) process.exit(0);
+      } catch {}
+
       // Check if already allowed by settings (skip if so)
       const home = process.env.HOME;
       const toolInput = data.tool_input || {};

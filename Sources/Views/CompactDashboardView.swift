@@ -30,17 +30,29 @@ struct CompactDashboardView: View {
         return names.joined(separator: " · ")
     }
 
-    /// Only show prompts from BACKGROUND windows (not the one user is looking at)
+    /// Show prompts only from BACKGROUND projects (frontmost project's hook doesn't block)
     private var hookPrompt: RemoteControlService.PromptInfo? {
-        guard let prompt = windowManager.rcService.activePrompt,
-              let cwd = prompt.cwd else { return nil }
-        let project = URL(fileURLWithPath: cwd).lastPathComponent
-        // If the prompt is from the frontmost window, don't show — user can see it
-        if let front = frontmostMonitoredWindow,
-           front.windowTitle.localizedCaseInsensitiveContains(project) {
-            return nil
+        windowManager.rcService.activePrompt
+    }
+
+    /// Write the frontmost project name to a file so the hook knows which project is visible
+    private func startFrontmostTracking() {
+        Task {
+            while true {
+                try? await Task.sleep(for: .seconds(1))
+                if let front = frontmostMonitoredWindow {
+                    let title = front.windowTitle
+                    let project: String
+                    if let dash = title.range(of: " — ", options: .backwards) {
+                        project = String(title[dash.upperBound...])
+                    } else {
+                        project = title
+                    }
+                    let path = FileManager.default.temporaryDirectory.path + "/agenthub-frontmost.txt"
+                    try? project.write(toFile: path, atomically: true, encoding: .utf8)
+                }
+            }
         }
-        return prompt
     }
 
     /// Find the frontmost monitored window by checking ALL on-screen windows in z-order.
@@ -91,9 +103,9 @@ struct CompactDashboardView: View {
             } else {
                 topBar
 
-                // Prompt overlay
+                // Permission prompt banner (top, full width — always visible)
                 if let prompt = hookPrompt {
-                    actionOverlay(prompt)
+                    promptBanner(prompt)
                 }
 
                 // Window grid
@@ -159,6 +171,7 @@ struct CompactDashboardView: View {
         .onAppear {
             Task { await windowManager.autoDiscoverAgentWindows() }
             terminal.autoConnect()
+            startFrontmostTracking()
         }
     }
 
@@ -267,9 +280,9 @@ struct CompactDashboardView: View {
                window.displayName.localizedCaseInsensitiveContains(project)
     }
 
-    // MARK: - Action Overlay (dynamic buttons from hook-detected prompts)
+    // MARK: - Permission Prompt Banner (top, full width)
 
-    private func actionOverlay(_ prompt: RemoteControlService.PromptInfo) -> some View {
+    private func promptBanner(_ prompt: RemoteControlService.PromptInfo) -> some View {
         VStack(spacing: 8) {
             // Show which project triggered the prompt
             if let cwd = prompt.cwd {
@@ -306,13 +319,10 @@ struct CompactDashboardView: View {
                 )
             }
         }
-        .padding(12)
-        .background(.ultraThinMaterial)
-        .background(Color.black.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .shadow(color: .black.opacity(0.3), radius: 8)
-        .padding(8)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .background(.orange.opacity(0.15))
+        .overlay(Rectangle().frame(height: 1).foregroundStyle(.orange.opacity(0.3)), alignment: .bottom)
     }
 
     private func buttonColor(for label: String) -> Color {
@@ -405,32 +415,99 @@ struct CompactDashboardView: View {
         messageText = ""
         NotificationCenter.default.post(name: .init("AgentHubClearInput"), object: nil)
 
-        let pid = Self.findPID(for: window)
+        let title = window.windowTitle
+        let project: String
+        if let lastDash = title.range(of: " — ", options: .backwards) {
+            project = String(title[lastDash.upperBound...])
+        } else {
+            project = title
+        }
 
-        // Bring window to front
-        windowManager.bringWindowToFront(window)
+        // 1. Save clipboard
+        let pasteboard = NSPasteboard.general
+        let saved = pasteboard.string(forType: .string)
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-            // Send text in 20-char chunks (CGEvent max per event)
-            let utf16 = Array(text.utf16)
-            for i in stride(from: 0, to: utf16.count, by: 20) {
-                let end = min(i + 20, utf16.count)
-                var chunk = Array(utf16[i..<end])
-                let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: true)
-                down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
-                if let pid { down?.postToPid(pid) } else { down?.post(tap: .cghidEventTap) }
-                let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: false)
-                if let pid { up?.postToPid(pid) } else { up?.post(tap: .cghidEventTap) }
-                Thread.sleep(forTimeInterval: 0.005)
+        // 2. Set text on clipboard
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        // 3. Raise the correct window (AXRaise BEFORE activate)
+        Self.raiseWindowByProjectName(project, ownerName: window.ownerName)
+
+        // 4. Wait, verify, paste, enter
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.7) {
+            // Verify correct window is in front
+            if !Self.verifyFrontWindow(contains: project) {
+                // Retry
+                DispatchQueue.main.sync {
+                    Self.raiseWindowByProjectName(project, ownerName: window.ownerName)
+                }
+                Thread.sleep(forTimeInterval: 0.5)
             }
 
-            // Send Enter
-            Thread.sleep(forTimeInterval: 0.02)
-            let enterDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: true)
-            if let pid { enterDown?.postToPid(pid) } else { enterDown?.post(tap: .cghidEventTap) }
-            let enterUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: false)
-            if let pid { enterUp?.postToPid(pid) } else { enterUp?.post(tap: .cghidEventTap) }
+            // Cmd+V paste (single operation — fast and reliable)
+            let src = CGEventSource(stateID: .hidSystemState)
+            let vDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
+            vDown?.flags = .maskCommand
+            vDown?.post(tap: .cghidEventTap)
+            CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)?.post(tap: .cghidEventTap)
+
+            Thread.sleep(forTimeInterval: 0.15)
+
+            // Enter
+            CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: true)?.post(tap: .cghidEventTap)
+            CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: false)?.post(tap: .cghidEventTap)
+
+            // Restore clipboard
+            Thread.sleep(forTimeInterval: 0.3)
+            DispatchQueue.main.async {
+                pasteboard.clearContents()
+                if let s = saved { pasteboard.setString(s, forType: .string) }
+            }
         }
+    }
+
+    /// Check if the topmost non-AgentHub window contains the project name
+    private static func verifyFrontWindow(contains project: String) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        for info in list {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != myPID,
+                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  let t = info[kCGWindowName as String] as? String,
+                  let b = info[kCGWindowBounds as String] as? [String: Any],
+                  let w = b["Width"] as? CGFloat, w > 200 else { continue }
+            return t.localizedCaseInsensitiveContains(project)
+        }
+        return false
+    }
+
+    /// Raise a specific window: AXRaise first, THEN activate app
+    private static func raiseWindowByProjectName(_ projectName: String, ownerName: String) {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: {
+            $0.localizedName == ownerName
+        }) else { return }
+
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let axWindows = windowsRef as? [AXUIElement] else {
+            app.activate()
+            return
+        }
+
+        for axWindow in axWindows {
+            var titleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef)
+            if let axTitle = titleRef as? String,
+               axTitle.localizedCaseInsensitiveContains(projectName) {
+                // Raise FIRST, then activate — ensures this specific window comes to front
+                AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+                app.activate()
+                return
+            }
+        }
+        app.activate()
     }
 
     private static func findPID(for window: MonitoredWindow) -> pid_t? {
