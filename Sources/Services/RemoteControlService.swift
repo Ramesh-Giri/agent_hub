@@ -202,54 +202,21 @@ final class RemoteControlService: ObservableObject {
       // Only intercept in modes that show permission dialogs
       if (!['default', 'plan'].includes(mode)) process.exit(0);
 
-      // Only for tools that need permission
-      const tool = data.tool_name || '';
-      if (!['Bash', 'Write', 'Edit'].includes(tool)) process.exit(0);
+      // Only for tools that typically need permission
+      if (!['Bash', 'Write', 'Edit'].includes(data.tool_name || '')) process.exit(0);
 
-      // Skip read-only / safe Bash commands
-      if (tool === 'Bash') {
-        const cmd = (data.tool_input?.command || '').trim();
-        const safe = /^(cat|ls|echo|head|tail|wc|which|whoami|date|pwd|find|grep|rg|ag|git\\s|node\\s+-e|swift\\s+-e|swift\\s+build|swift\\s+test|python3?\\s+-[ec]|curl\\s+-s|security\\s+find|brew\\s|pgrep|ps\\s|pkill|mkdir|touch|cp\\s|mv\\s|rm\\s|chmod|open\\s|cd\\s|\\.\\//)/;
-        if (safe.test(cmd)) process.exit(0);
-      }
-
+      // Write prompt file for AgentHub (non-blocking notification)
       const uuid = crypto.randomUUID();
-      const promptFile = tmpDir + '/agenthub-prompt-' + uuid + '.json';
-      const responseFile = tmpDir + '/agenthub-response-' + uuid + '.json';
-
       data._cwd = process.cwd();
       data._uuid = uuid;
-      fs.writeFileSync(promptFile, JSON.stringify(data, null, 2));
+      fs.writeFileSync(
+        tmpDir + '/agenthub-prompt-' + uuid + '.json',
+        JSON.stringify(data, null, 2)
+      );
 
-      // Block and wait for AgentHub's response (max 2 min)
-      const start = Date.now();
-      const poll = () => {
-        try {
-          if (fs.existsSync(responseFile)) {
-            const raw = fs.readFileSync(responseFile, 'utf8');
-            try { fs.unlinkSync(responseFile); } catch {}
-            try { fs.unlinkSync(promptFile); } catch {}
-            const resp = JSON.parse(raw);
-            // Output hook decision for Claude Code
-            const output = {
-              hookSpecificOutput: {
-                hookEventName: 'PreToolUse',
-                permissionDecision: resp.allow ? 'allow' : 'deny',
-                permissionDecisionReason: resp.allow ? 'Allowed from AgentHub' : 'Denied from AgentHub'
-              }
-            };
-            process.stdout.write(JSON.stringify(output));
-            process.exit(0);
-          }
-        } catch(e) {}
-
-        if (Date.now() - start > 120000) {
-          try { fs.unlinkSync(promptFile); } catch {}
-          process.exit(0); // Timeout — fall through to normal prompt
-        }
-        setTimeout(poll, 200);
-      };
-      poll();
+      // Exit immediately — Claude Code shows its normal prompt
+      // User responds from floating panel via CGEvent or from terminal directly
+      process.exit(0);
     } catch(e) {
       process.exit(0);
     }

@@ -166,10 +166,13 @@ struct CompactDashboardView: View {
                 Image(nsImage: icon).resizable().frame(width: 14, height: 14)
             }
 
-            Text(projectName)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
+            // Only show title when one or zero windows (cards already have titles)
+            if visibleWindows.count <= 1 {
+                Text(projectName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+            }
 
             if hookPrompt != nil {
                 Text("Action")
@@ -269,13 +272,38 @@ struct CompactDashboardView: View {
             HStack(spacing: 8) {
                 TapButton(
                     label: "Allow",
-                    action: { windowManager.rcService.respondToPrompt(allow: true) },
+                    action: {
+                        // Send "1" + Enter to the window that triggered the prompt
+                        if let cwd = prompt.cwd,
+                           let target = windowManager.monitoredWindows.first(where: {
+                               $0.windowTitle.localizedCaseInsensitiveContains(
+                                   URL(fileURLWithPath: cwd).lastPathComponent
+                               )
+                           }) {
+                            sendKeystrokeToWindow("1\r", window: target)
+                        } else {
+                            sendKeystroke("1\r")
+                        }
+                        windowManager.rcService.activePrompt = nil
+                    },
                     color: .white, bgColor: .green.opacity(0.7),
                     font: .system(size: 12, weight: .bold)
                 )
                 TapButton(
                     label: "Deny",
-                    action: { windowManager.rcService.respondToPrompt(allow: false) },
+                    action: {
+                        if let cwd = prompt.cwd,
+                           let target = windowManager.monitoredWindows.first(where: {
+                               $0.windowTitle.localizedCaseInsensitiveContains(
+                                   URL(fileURLWithPath: cwd).lastPathComponent
+                               )
+                           }) {
+                            sendKeystrokeToWindow("3\r", window: target)
+                        } else {
+                            sendKeystroke("3\r")
+                        }
+                        windowManager.rcService.activePrompt = nil
+                    },
                     color: .white, bgColor: .red.opacity(0.7),
                     font: .system(size: 12, weight: .bold)
                 )
@@ -295,6 +323,24 @@ struct CompactDashboardView: View {
         if l.contains("yes") || l.contains("allow") || l.contains("accept") || l.contains("1.") { return .green.opacity(0.7) }
         if l.contains("no") || l.contains("deny") || l.contains("reject") || l.contains("3.") { return .red.opacity(0.7) }
         return .blue.opacity(0.6)
+    }
+
+    /// Send a keystroke to a specific window
+    private func sendKeystrokeToWindow(_ text: String, window: MonitoredWindow) {
+        let pid = Self.findPID(for: window)
+        windowManager.bringWindowToFront(window)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            let utf16 = Array(text.utf16)
+            for i in stride(from: 0, to: utf16.count, by: 20) {
+                let end = min(i + 20, utf16.count)
+                var chunk = Array(utf16[i..<end])
+                let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: true)
+                down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
+                if let pid { down?.postToPid(pid) } else { down?.post(tap: .cghidEventTap) }
+                let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: false)
+                if let pid { up?.postToPid(pid) } else { up?.post(tap: .cghidEventTap) }
+            }
+        }
     }
 
     /// Send a keystroke to the selected window (for action buttons)
