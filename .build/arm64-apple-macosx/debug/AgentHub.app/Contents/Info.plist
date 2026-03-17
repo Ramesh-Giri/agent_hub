@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>AgentHub</string>
+    <key>CFBundleDisplayName</key>
+    <string>AgentHub</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.techkreator.AgentHub</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>AgentHub</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>AgentHub needs screen capture permission to show live previews of your AI agent windows.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>AgentHub needs automation permission to interact with your AI agent windows.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>AgentHub uses the microphone for voice commands to AI agent windows.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>AgentHub uses speech recognition to convert voice input into text commands.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>AgentHub uses the local network so the iOS companion app can send commands.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_agenthub._tcp</string>
+    </array>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
