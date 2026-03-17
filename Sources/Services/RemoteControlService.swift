@@ -209,7 +209,7 @@ final class RemoteControlService: ObservableObject {
       // Skip read-only / safe Bash commands
       if (tool === 'Bash') {
         const cmd = (data.tool_input?.command || '').trim();
-        const safe = /^(cat|ls|echo|head|tail|wc|which|whoami|date|pwd|find|grep|rg|ag|git\\s+(status|log|diff|show|branch|remote|describe|tag|rev-parse)|node\\s+-e|swift\\s+-e|python3?\\s+-[ec]|curl\\s+-s|security\\s+find|brew\\s+(list|info)|pgrep|ps\\s)/;
+        const safe = /^(cat|ls|echo|head|tail|wc|which|whoami|date|pwd|find|grep|rg|ag|git\\s|node\\s+-e|swift\\s+-e|swift\\s+build|swift\\s+test|python3?\\s+-[ec]|curl\\s+-s|security\\s+find|brew\\s|pgrep|ps\\s|pkill|mkdir|touch|cp\\s|mv\\s|rm\\s|chmod|open\\s|cd\\s|\\.\\//)/;
         if (safe.test(cmd)) process.exit(0);
       }
 
