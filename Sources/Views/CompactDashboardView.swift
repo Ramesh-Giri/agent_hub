@@ -30,9 +30,17 @@ struct CompactDashboardView: View {
         return names.joined(separator: " · ")
     }
 
-    /// Active prompt from the hook system
+    /// Only show prompts from BACKGROUND windows (not the one user is looking at)
     private var hookPrompt: RemoteControlService.PromptInfo? {
-        windowManager.rcService.activePrompt
+        guard let prompt = windowManager.rcService.activePrompt,
+              let cwd = prompt.cwd else { return nil }
+        let project = URL(fileURLWithPath: cwd).lastPathComponent
+        // If the prompt is from the frontmost window, don't show — user can see it
+        if let front = frontmostMonitoredWindow,
+           front.windowTitle.localizedCaseInsensitiveContains(project) {
+            return nil
+        }
+        return prompt
     }
 
     /// Find the frontmost monitored window by checking ALL on-screen windows in z-order.
