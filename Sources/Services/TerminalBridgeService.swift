@@ -6,6 +6,7 @@ import Foundation
 final class TerminalBridgeService: ObservableObject {
     @Published var isConnected = false
     @Published var lastOutput = ""
+    @Published var recentLines: [String] = []
     @Published var activePrompt: TerminalPrompt?
     @Published var sessionName = ""
 
@@ -20,36 +21,43 @@ final class TerminalBridgeService: ObservableObject {
 
     // MARK: - Connection
 
-    /// Connect to ttyd on localhost
+    /// Connect to ttyd on localhost — fetches token, connects WebSocket with tty subprotocol
     func connect(port: Int = 7681) {
-        guard let url = URL(string: "ws://localhost:\(port)/ws") else { return }
-        let session = URLSession(configuration: .default)
-        webSocket = session.webSocketTask(with: url)
-        webSocket?.resume()
-        isConnected = true
-        receiveLoop()
+        // Step 1: Get auth token
+        let tokenURL = URL(string: "http://localhost:\(port)/token")!
+        URLSession.shared.dataTask(with: tokenURL) { [weak self] data, _, _ in
+            var token = ""
+            if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                token = json["token"] as? String ?? ""
+            }
+            Task { @MainActor [weak self] in
+                self?.connectWebSocket(port: port, token: token)
+            }
+        }.resume()
     }
 
-    /// Connect to a remote ttyd via ngrok URL with basic auth
-    func connect(url: String, username: String = "agent", password: String = "") {
-        guard var urlComp = URLComponents(string: url) else { return }
-        urlComp.scheme = urlComp.scheme == "https" ? "wss" : "ws"
-        urlComp.path = "/ws"
-        guard let wsURL = urlComp.url else { return }
+    private func connectWebSocket(port: Int, token: String) {
+        guard let url = URL(string: "ws://localhost:\(port)/ws?token=\(token)") else { return }
 
-        let config = URLSessionConfiguration.default
-        if !username.isEmpty {
-            let cred = "\(username):\(password)"
-            if let data = cred.data(using: .utf8) {
-                config.httpAdditionalHeaders = [
-                    "Authorization": "Basic \(data.base64EncodedString())"
-                ]
+        var request = URLRequest(url: url)
+        request.setValue("tty", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+
+        let session = URLSession(configuration: .default)
+        webSocket = session.webSocketTask(with: request)
+        webSocket?.resume()
+
+        // Send init message with auth token and terminal size
+        let initMsg = "{\"AuthToken\":\"\(token)\",\"columns\":80,\"rows\":24}"
+        webSocket?.send(.string(initMsg)) { [weak self] error in
+            Task { @MainActor [weak self] in
+                if error == nil {
+                    self?.isConnected = true
+                    self?.lastOutput = "Connected to terminal"
+                } else {
+                    self?.lastOutput = "Connection failed: \(error?.localizedDescription ?? "")"
+                }
             }
         }
-        let session = URLSession(configuration: config)
-        webSocket = session.webSocketTask(with: wsURL)
-        webSocket?.resume()
-        isConnected = true
         receiveLoop()
     }
 
@@ -62,13 +70,30 @@ final class TerminalBridgeService: ObservableObject {
 
     // MARK: - Send
 
+    @Published var debugInfo = ""
+
     /// Send a text command (keystrokes) to the terminal
     func sendText(_ text: String) {
-        guard let data = text.data(using: .utf8) else { return }
-        // ttyd protocol: type 0 = input
-        var payload = Data([0])  // input type
-        payload.append(data)
-        webSocket?.send(.data(payload)) { _ in }
+        guard let textData = text.data(using: .utf8) else {
+            debugInfo = "encode failed"
+            return
+        }
+        guard let ws = webSocket else {
+            debugInfo = "ws nil!"
+            return
+        }
+        var payload = Data([0])
+        payload.append(textData)
+        debugInfo = "sending \(payload.count)b"
+        ws.send(.data(payload)) { [weak self] error in
+            Task { @MainActor [weak self] in
+                if let error {
+                    self?.debugInfo = "send err: \(error.localizedDescription)"
+                } else {
+                    self?.debugInfo = "sent ok"
+                }
+            }
+        }
     }
 
     /// Send Enter key
@@ -116,11 +141,17 @@ final class TerminalBridgeService: ObservableObject {
         let type = data[0]
         let payload = data.suffix(from: 1)
 
-        if type == 0 {
-            // Output data
+        // ttyd types: 48 ('0') = output, 49 ('1') = title, 50 ('2') = prefs
+        if type == 48 || type == 0 {
             if let text = String(data: payload, encoding: .utf8) {
                 Task { @MainActor [weak self] in
                     self?.processOutput(text)
+                }
+            }
+        } else if type == 49 || type == 1 {
+            if let title = String(data: payload, encoding: .utf8) {
+                Task { @MainActor [weak self] in
+                    self?.sessionName = title
                 }
             }
         }
@@ -135,22 +166,29 @@ final class TerminalBridgeService: ObservableObject {
     // MARK: - Parse Terminal Output
 
     private func processOutput(_ text: String) {
-        // Strip ANSI escape codes for clean text
         let clean = text.stripANSI()
         outputBuffer += clean
 
-        // Keep buffer reasonable
         if outputBuffer.count > 5000 {
             outputBuffer = String(outputBuffer.suffix(3000))
         }
 
-        // Update last output (last meaningful line)
-        let lines = clean.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        if let last = lines.last {
-            lastOutput = last.trimmingCharacters(in: .whitespaces)
+        // Update recent lines for display
+        let newLines = clean.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0.count > 1 }
+        for line in newLines {
+            recentLines.append(line)
+        }
+        // Keep last 20 lines
+        if recentLines.count > 20 {
+            recentLines = Array(recentLines.suffix(20))
         }
 
-        // Detect prompts
+        if let last = newLines.last {
+            lastOutput = last
+        }
+
         detectPrompt()
     }
 
@@ -190,35 +228,80 @@ final class TerminalBridgeService: ObservableObject {
         activePrompt = nil
     }
 
-    // MARK: - Auto-connect from saved config
+    private static let ttydPort = 7681
+    private var ttydProcess: Process?
 
+    // MARK: - Auto-start & connect
+
+    /// Automatically starts ttyd (if not running) and connects via WebSocket
     func autoConnect() {
-        // Check if ttyd is running locally
-        let localURL = URL(string: "http://localhost:7681/")!
+        // First check if ttyd is already running
+        checkAndConnect { [weak self] connected in
+            if !connected {
+                // Start ttyd ourselves
+                self?.startTtyd { success in
+                    if success {
+                        // Wait for ttyd to be ready, then connect
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            self?.checkAndConnect { _ in }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func checkAndConnect(completion: @escaping (Bool) -> Void) {
+        let localURL = URL(string: "http://localhost:\(Self.ttydPort)/")!
         var request = URLRequest(url: localURL, timeoutInterval: 2)
         request.httpMethod = "HEAD"
         URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
                 Task { @MainActor [weak self] in
-                    self?.connect(port: 7681)
-                    self?.sessionName = "Local Terminal"
+                    self?.connect(port: Self.ttydPort)
+                    self?.sessionName = "Claude Terminal"
                 }
-                return
-            }
-
-            // Check for saved ngrok config
-            let configPath = FileManager.default.temporaryDirectory.path + "/agenthub-terminal.json"
-            if let data = FileManager.default.contents(atPath: configPath),
-               let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let url = config["url"] as? String,
-               let password = config["password"] as? String,
-               let session = config["session"] as? String {
-                Task { @MainActor [weak self] in
-                    self?.connect(url: url, username: "agent", password: password)
-                    self?.sessionName = session
-                }
+                completion(true)
+            } else {
+                completion(false)
             }
         }.resume()
+    }
+
+    /// Starts ttyd serving a zsh shell on the configured port
+    nonisolated private func startTtyd(completion: @escaping (Bool) -> Void) {
+        let ttydPath = "/opt/homebrew/bin/ttyd"
+        guard FileManager.default.fileExists(atPath: ttydPath) else {
+            completion(false)
+            return
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: ttydPath)
+        proc.arguments = [
+            "-p", "\(Self.ttydPort)",
+            "-t", "fontSize=13",
+            "-t", "theme={\"background\":\"#1a1a2e\",\"foreground\":\"#e0e0e0\"}",
+            "/bin/zsh"
+        ]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+
+        do {
+            try proc.run()
+            Task { @MainActor [weak self] in
+                self?.ttydProcess = proc
+            }
+            completion(true)
+        } catch {
+            completion(false)
+        }
+    }
+
+    /// Stop ttyd when service is deallocated
+    func stopTtyd() {
+        ttydProcess?.terminate()
+        ttydProcess = nil
     }
 }
 
@@ -226,11 +309,12 @@ final class TerminalBridgeService: ObservableObject {
 
 extension String {
     func stripANSI() -> String {
-        // Remove ANSI escape sequences
         replacingOccurrences(
-            of: #"\x1B\[[0-9;]*[A-Za-z]|\x1B\][^\x07]*\x07|\x1B[()][0-9A-Za-z]"#,
+            of: #"\x1B\[[\?\!]?[0-9;]*[A-Za-z]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)|\x1B[()][0-9A-Za-z]|\x1B\[[\?]?[0-9;]*[hl]|\r"#,
             with: "",
             options: .regularExpression
         )
+        .replacingOccurrences(of: "\u{07}", with: "")  // bell
+        .replacingOccurrences(of: "\u{1B}", with: "")  // stray ESC
     }
 }

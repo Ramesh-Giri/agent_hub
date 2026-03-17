@@ -10,6 +10,7 @@ struct CompactDashboardView: View {
     @State private var isMinimized = false
     @State private var messageText = ""
     @State private var selectedWindowID: CGWindowID?
+    @State private var showScreenView = true
 
     private var selectedWindow: MonitoredWindow? {
         let windows = windowManager.monitoredWindows
@@ -31,24 +32,24 @@ struct CompactDashboardView: View {
             if isMinimized {
                 minimizedPill
             } else {
-                // Top bar
                 topBar
 
-                // Live screen view
-                ZStack(alignment: .bottom) {
-                    screenView
-
-                    // Prompt overlay (appears when Claude needs input)
-                    if let prompt = terminal.activePrompt {
-                        promptOverlay(prompt)
+                // Main content area
+                if showScreenView {
+                    // Screen share mode: screenshot + prompt overlay
+                    ZStack(alignment: .bottom) {
+                        screenView
+                        if let prompt = terminal.activePrompt {
+                            promptOverlay(prompt)
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    // Terminal output mode
+                    terminalOutputView
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Status bar
-                statusBar
-
-                // Input bar
+                // Input bar (always visible)
                 inputBar
 
                 // Window tabs
@@ -65,11 +66,10 @@ struct CompactDashboardView: View {
         }
     }
 
-    // MARK: - Top Bar (like Zoom meeting controls)
+    // MARK: - Top Bar
 
     private var topBar: some View {
         HStack(spacing: 8) {
-            // Connection indicator
             Circle()
                 .fill(terminal.isConnected ? .green : .gray)
                 .frame(width: 8, height: 8)
@@ -85,14 +85,19 @@ struct CompactDashboardView: View {
 
             Spacer()
 
-            // Minimize
+            // Toggle screen/terminal view
+            TapIconButton(
+                systemName: showScreenView ? "terminal" : "display",
+                action: { showScreenView.toggle() },
+                color: .white.opacity(0.7)
+            )
+
             TapIconButton(
                 systemName: "chevron.down.2",
                 action: { isMinimized = true; onMinimize?() },
                 color: .white.opacity(0.7)
             )
 
-            // Expand to full app
             TapIconButton(
                 systemName: "arrow.up.left.and.arrow.down.right",
                 action: onExpand,
@@ -104,7 +109,34 @@ struct CompactDashboardView: View {
         .background(Color(white: 0.12))
     }
 
-    // MARK: - Screen View (live screenshot)
+    // MARK: - Terminal Output View
+
+    private var terminalOutputView: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(terminal.recentLines.enumerated()), id: \.offset) { idx, line in
+                        Text(line)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(idx)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+            }
+            .background(Color(white: 0.05))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: terminal.recentLines.count) { _, newCount in
+                withAnimation {
+                    proxy.scrollTo(newCount - 1, anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    // MARK: - Screen View
 
     private var screenView: some View {
         Group {
@@ -117,7 +149,7 @@ struct CompactDashboardView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { windowManager.bringWindowToFront(window) }
             } else {
-                Color(white: 0.08)
+                Color(white: 0.05)
                     .overlay {
                         VStack(spacing: 10) {
                             Image(systemName: "display")
@@ -132,11 +164,10 @@ struct CompactDashboardView: View {
         }
     }
 
-    // MARK: - Prompt Overlay (action buttons when Claude needs input)
+    // MARK: - Prompt Overlay
 
     private func promptOverlay(_ prompt: TerminalBridgeService.TerminalPrompt) -> some View {
         VStack(spacing: 8) {
-            // Prompt text
             Text(prompt.text)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.white)
@@ -144,14 +175,11 @@ struct CompactDashboardView: View {
                 .lineLimit(3)
                 .padding(.horizontal, 12)
 
-            // Option buttons
             HStack(spacing: 8) {
                 ForEach(Array(prompt.options.enumerated()), id: \.offset) { index, option in
                     TapButton(
                         label: option,
-                        action: {
-                            terminal.sendOption(index + 1)
-                        },
+                        action: { terminal.sendOption(index + 1) },
                         color: .white,
                         bgColor: buttonColor(for: option),
                         font: .system(size: 12, weight: .semibold)
@@ -175,47 +203,21 @@ struct CompactDashboardView: View {
         return .blue.opacity(0.6)
     }
 
-    // MARK: - Status Bar
-
-    private var statusBar: some View {
-        HStack(spacing: 6) {
-            if !terminal.lastOutput.isEmpty {
-                Text(terminal.lastOutput)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .lineLimit(1)
-            } else {
-                Text(terminal.isConnected ? "Connected" : "Not connected — run: source ~/.claude/scripts/remote-terminal.sh && remote-terminal")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.4))
-                    .lineLimit(1)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
-        .background(Color(white: 0.08))
-    }
-
     // MARK: - Input Bar
 
     private var inputBar: some View {
         HStack(spacing: 8) {
-            TextField("Send a message...", text: $messageText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color(white: 0.15))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .onSubmit { sendMessage() }
-
-            TapIconButton(
-                systemName: "arrow.up.circle.fill",
-                action: sendMessage,
-                color: messageText.isEmpty ? .gray : .blue
+            PanelTextField(
+                placeholder: "Send a message...",
+                text: $messageText,
+                onSubmit: { sendMessage() }
             )
+            .frame(height: 34)
+
+            PanelSendButton(title: "  Send  ") {
+                sendMessage()
+            }
+            .frame(height: 30)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -223,9 +225,49 @@ struct CompactDashboardView: View {
     }
 
     private func sendMessage() {
-        guard !messageText.isEmpty else { return }
-        terminal.sendCommand(messageText)
+        let text = messageText.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return }
+        guard let window = selectedWindow else { return }
         messageText = ""
+        // Force-clear any NSTextField showing our text
+        NotificationCenter.default.post(name: .init("AgentHubClearInput"), object: nil)
+
+        // Get the target app's PID
+        let pid = Self.findPID(for: window)
+
+        // Bring window to front
+        windowManager.bringWindowToFront(window)
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+            // Send text in 20-char chunks (CGEvent max per event)
+            let utf16 = Array(text.utf16)
+            for i in stride(from: 0, to: utf16.count, by: 20) {
+                let end = min(i + 20, utf16.count)
+                var chunk = Array(utf16[i..<end])
+                let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: true)
+                down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
+                if let pid { down?.postToPid(pid) } else { down?.post(tap: .cghidEventTap) }
+                let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: false)
+                if let pid { up?.postToPid(pid) } else { up?.post(tap: .cghidEventTap) }
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+
+            // Send Enter
+            Thread.sleep(forTimeInterval: 0.02)
+            let enterDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: true)
+            if let pid { enterDown?.postToPid(pid) } else { enterDown?.post(tap: .cghidEventTap) }
+            let enterUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: false)
+            if let pid { enterUp?.postToPid(pid) } else { enterUp?.post(tap: .cghidEventTap) }
+        }
+    }
+
+    private static func findPID(for window: MonitoredWindow) -> pid_t? {
+        guard let apps = NSWorkspace.shared.runningApplications as [NSRunningApplication]? else { return nil }
+        let app = apps.first {
+            $0.bundleIdentifier == window.bundleIdentifier ||
+            $0.localizedName == window.ownerName
+        }
+        return app?.processIdentifier
     }
 
     // MARK: - Window Tabs
@@ -269,6 +311,16 @@ struct CompactDashboardView: View {
             Text(count > 0 ? "\(count) window\(count == 1 ? "" : "s")" : "AgentHub")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.white.opacity(0.9))
+
+            if terminal.activePrompt != nil {
+                Text("Action needed")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.orange)
+                    .clipShape(Capsule())
+            }
 
             Spacer()
 
