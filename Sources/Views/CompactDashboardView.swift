@@ -17,16 +17,17 @@ struct CompactDashboardView: View {
         return windows.first
     }
 
-    /// Show the project name of the frontmost window (what the user is working on)
+    /// Show names of windows visible in the panel (background ones)
     private var projectName: String {
-        if let front = frontmostMonitoredWindow {
-            let title = front.windowTitle
+        let names = visibleWindows.compactMap { window -> String? in
+            let title = window.windowTitle
             if let lastDash = title.range(of: " — ", options: .backwards) {
                 return String(title[lastDash.upperBound...])
             }
-            return !title.isEmpty ? title : front.ownerName
+            return !title.isEmpty ? title : window.ownerName
         }
-        return "AgentHub"
+        if names.isEmpty { return "AgentHub" }
+        return names.joined(separator: " · ")
     }
 
     /// Active prompt from the hook system
