@@ -193,19 +193,13 @@ struct CompactDashboardView: View {
             HStack(spacing: 8) {
                 TapButton(
                     label: "Allow",
-                    action: {
-                        sendKeystroke("1\r")  // Option 1: Yes
-                        windowManager.rcService.activePrompt = nil
-                    },
+                    action: { windowManager.rcService.respondToPrompt(allow: true) },
                     color: .white, bgColor: .green.opacity(0.7),
                     font: .system(size: 12, weight: .bold)
                 )
                 TapButton(
                     label: "Deny",
-                    action: {
-                        sendKeystroke("3\r")  // Option 3: No
-                        windowManager.rcService.activePrompt = nil
-                    },
+                    action: { windowManager.rcService.respondToPrompt(allow: false) },
                     color: .white, bgColor: .red.opacity(0.7),
                     font: .system(size: 12, weight: .bold)
                 )

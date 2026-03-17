@@ -40,17 +40,14 @@ final class RemoteControlService: ObservableObject {
         try? FileManager.default.removeItem(atPath: Self.promptDir + "/agenthub-active")
     }
 
-    /// Respond to the current prompt — writes response file that the hook reads
+    /// Respond to the current prompt — writes response file that the blocking hook reads
     func respondToPrompt(allow: Bool) {
         guard let prompt = activePrompt else { return }
         let responsePath = Self.promptDir + "/agenthub-response-" + prompt.id + ".json"
-        let decision: [String: Any] = ["decision": allow ? "allow" : "deny"]
-        if let data = try? JSONSerialization.data(withJSONObject: decision) {
+        let response: [String: Any] = ["allow": allow]
+        if let data = try? JSONSerialization.data(withJSONObject: response) {
             try? data.write(to: URL(fileURLWithPath: responsePath))
         }
-        // Clean up prompt file
-        let promptPath = Self.promptDir + "/" + Self.promptPrefix + prompt.id + ".json"
-        try? FileManager.default.removeItem(atPath: promptPath)
         activePrompt = nil
     }
 
@@ -184,7 +181,8 @@ final class RemoteControlService: ObservableObject {
         }
     }
 
-    /// Non-blocking hook: notifies AgentHub of prompts, doesn't block Claude Code
+    /// Blocking hook: waits for AgentHub to respond with allow/deny
+    /// Outputs the decision so Claude Code acts on it — no terminal dialog needed
     private nonisolated static let hookScript = """
     #!/usr/bin/env node
     const fs = require('fs');
@@ -201,24 +199,57 @@ final class RemoteControlService: ObservableObject {
       const data = JSON.parse(input);
       const mode = data.permission_mode || 'default';
 
-      // Only notify in default/plan mode (these are the modes that show permission dialogs)
+      // Only intercept in modes that show permission dialogs
       if (!['default', 'plan'].includes(mode)) process.exit(0);
 
-      // Only for tools that show permission prompts
-      if (!['Bash', 'Write', 'Edit'].includes(data.tool_name || '')) process.exit(0);
+      // Only for tools that need permission
+      const tool = data.tool_name || '';
+      if (!['Bash', 'Write', 'Edit'].includes(tool)) process.exit(0);
 
-      // Write prompt file for AgentHub (non-blocking)
+      // Skip read-only / safe Bash commands
+      if (tool === 'Bash') {
+        const cmd = (data.tool_input?.command || '').trim();
+        const safe = /^(cat|ls|echo|head|tail|wc|which|whoami|date|pwd|find|grep|rg|ag|git\\s+(status|log|diff|show|branch|remote|describe|tag|rev-parse)|node\\s+-e|swift\\s+-e|python3?\\s+-[ec]|curl\\s+-s|security\\s+find|brew\\s+(list|info)|pgrep|ps\\s)/;
+        if (safe.test(cmd)) process.exit(0);
+      }
+
       const uuid = crypto.randomUUID();
+      const promptFile = tmpDir + '/agenthub-prompt-' + uuid + '.json';
+      const responseFile = tmpDir + '/agenthub-response-' + uuid + '.json';
+
       data._cwd = process.cwd();
       data._uuid = uuid;
-      fs.writeFileSync(
-        tmpDir + '/agenthub-prompt-' + uuid + '.json',
-        JSON.stringify(data, null, 2)
-      );
+      fs.writeFileSync(promptFile, JSON.stringify(data, null, 2));
 
-      // Exit immediately — Claude Code shows its normal prompt
-      // AgentHub will send the response via CGEvent keystroke
-      process.exit(0);
+      // Block and wait for AgentHub's response (max 2 min)
+      const start = Date.now();
+      const poll = () => {
+        try {
+          if (fs.existsSync(responseFile)) {
+            const raw = fs.readFileSync(responseFile, 'utf8');
+            try { fs.unlinkSync(responseFile); } catch {}
+            try { fs.unlinkSync(promptFile); } catch {}
+            const resp = JSON.parse(raw);
+            // Output hook decision for Claude Code
+            const output = {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: resp.allow ? 'allow' : 'deny',
+                permissionDecisionReason: resp.allow ? 'Allowed from AgentHub' : 'Denied from AgentHub'
+              }
+            };
+            process.stdout.write(JSON.stringify(output));
+            process.exit(0);
+          }
+        } catch(e) {}
+
+        if (Date.now() - start > 120000) {
+          try { fs.unlinkSync(promptFile); } catch {}
+          process.exit(0); // Timeout — fall through to normal prompt
+        }
+        setTimeout(poll, 200);
+      };
+      poll();
     } catch(e) {
       process.exit(0);
     }
