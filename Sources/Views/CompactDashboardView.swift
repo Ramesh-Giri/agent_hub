@@ -84,14 +84,41 @@ struct CompactDashboardView: View {
                         }
                         .frame(maxHeight: .infinity)
                 } else {
-                    // Stack windows vertically — each takes equal share of space
-                    VStack(spacing: 4) {
-                        ForEach(visibleWindows) { window in
-                            floatingWindowCard(window)
-                                .frame(maxHeight: .infinity)
+                    // Adapt layout to panel shape
+                    GeometryReader { geo in
+                        let isWide = geo.size.width > geo.size.height
+                        let count = visibleWindows.count
+
+                        if isWide {
+                            // Horizontal: side by side
+                            HStack(spacing: 4) {
+                                ForEach(visibleWindows) { window in
+                                    floatingWindowCard(window)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
+                            }
+                            .padding(4)
+                        } else if count <= 2 || geo.size.height > geo.size.width * 1.5 {
+                            // Tall: stack vertically
+                            VStack(spacing: 4) {
+                                ForEach(visibleWindows) { window in
+                                    floatingWindowCard(window)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
+                            }
+                            .padding(4)
+                        } else {
+                            // Square-ish: 2-column grid
+                            let cols = [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)]
+                            LazyVGrid(columns: cols, spacing: 4) {
+                                ForEach(visibleWindows) { window in
+                                    floatingWindowCard(window)
+                                        .frame(height: (geo.size.height - 12) / ceil(Double(count) / 2))
+                                }
+                            }
+                            .padding(4)
                         }
                     }
-                    .padding(4)
                 }
 
                 // Input bar
