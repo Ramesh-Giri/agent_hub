@@ -27,6 +27,11 @@ struct CompactDashboardView: View {
         return !title.isEmpty ? title : window.ownerName
     }
 
+    /// Active prompt from the hook system
+    private var hookPrompt: RemoteControlService.PromptInfo? {
+        windowManager.rcService.activePrompt
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if isMinimized {
@@ -36,11 +41,12 @@ struct CompactDashboardView: View {
 
                 // Main content area
                 if showScreenView {
-                    // Screen share mode: screenshot + prompt overlay
+                    // Screen share mode: screenshot + action buttons overlay
                     ZStack(alignment: .bottom) {
                         screenView
-                        if let prompt = terminal.activePrompt {
-                            promptOverlay(prompt)
+
+                        if let prompt = hookPrompt {
+                            actionOverlay(prompt)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -82,6 +88,16 @@ struct CompactDashboardView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
+
+            if hookPrompt != nil {
+                Text("Action")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.orange)
+                    .clipShape(Capsule())
+            }
 
             Spacer()
 
@@ -164,27 +180,35 @@ struct CompactDashboardView: View {
         }
     }
 
-    // MARK: - Prompt Overlay
+    // MARK: - Action Overlay (dynamic buttons from hook-detected prompts)
 
-    private func promptOverlay(_ prompt: TerminalBridgeService.TerminalPrompt) -> some View {
+    private func actionOverlay(_ prompt: RemoteControlService.PromptInfo) -> some View {
         VStack(spacing: 8) {
-            Text(prompt.text)
-                .font(.system(size: 12, weight: .medium))
+            Text(prompt.description)
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white)
-                .multilineTextAlignment(.center)
-                .lineLimit(3)
+                .lineLimit(2)
                 .padding(.horizontal, 12)
 
             HStack(spacing: 8) {
-                ForEach(Array(prompt.options.enumerated()), id: \.offset) { index, option in
-                    TapButton(
-                        label: option,
-                        action: { terminal.sendOption(index + 1) },
-                        color: .white,
-                        bgColor: buttonColor(for: option),
-                        font: .system(size: 12, weight: .semibold)
-                    )
-                }
+                TapButton(
+                    label: "Allow",
+                    action: {
+                        sendKeystroke("1\r")  // Option 1: Yes
+                        windowManager.rcService.activePrompt = nil
+                    },
+                    color: .white, bgColor: .green.opacity(0.7),
+                    font: .system(size: 12, weight: .bold)
+                )
+                TapButton(
+                    label: "Deny",
+                    action: {
+                        sendKeystroke("3\r")  // Option 3: No
+                        windowManager.rcService.activePrompt = nil
+                    },
+                    color: .white, bgColor: .red.opacity(0.7),
+                    font: .system(size: 12, weight: .bold)
+                )
             }
         }
         .padding(12)
@@ -198,9 +222,37 @@ struct CompactDashboardView: View {
 
     private func buttonColor(for label: String) -> Color {
         let l = label.lowercased()
-        if l.contains("yes") || l.contains("allow") || l.contains("accept") { return .green.opacity(0.7) }
-        if l.contains("no") || l.contains("deny") || l.contains("reject") { return .red.opacity(0.7) }
+        if l.contains("yes") || l.contains("allow") || l.contains("accept") || l.contains("1.") { return .green.opacity(0.7) }
+        if l.contains("no") || l.contains("deny") || l.contains("reject") || l.contains("3.") { return .red.opacity(0.7) }
         return .blue.opacity(0.6)
+    }
+
+    /// Send a keystroke to the selected window (for action buttons)
+    private func sendKeystroke(_ text: String) {
+        guard let window = selectedWindow else { return }
+        let pid = Self.findPID(for: window)
+
+        windowManager.bringWindowToFront(window)
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+            let utf16 = Array(text.utf16)
+            for i in stride(from: 0, to: utf16.count, by: 20) {
+                let end = min(i + 20, utf16.count)
+                var chunk = Array(utf16[i..<end])
+                let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: true)
+                down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
+                if let pid { down?.postToPid(pid) } else { down?.post(tap: .cghidEventTap) }
+                let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: false)
+                if let pid { up?.postToPid(pid) } else { up?.post(tap: .cghidEventTap) }
+            }
+
+            // Clear the attention after responding
+            Task { @MainActor [weak windowManager] in
+                if let wid = window.id as CGWindowID? {
+                    windowManager?.attentionService.clearAttention(windowID: wid)
+                }
+            }
+        }
     }
 
     // MARK: - Input Bar

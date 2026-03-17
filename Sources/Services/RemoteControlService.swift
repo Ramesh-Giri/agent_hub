@@ -1,82 +1,226 @@
 import Foundation
 
-/// Ensures Remote Control is enabled in Claude Code settings
-/// so sessions appear at claude.ai/code for the floating panel WKWebView.
+/// Watches for Claude Code permission prompts via a lightweight hook.
+/// The hook writes prompt info to /tmp, this service reads it and publishes to UI.
 @MainActor
 final class RemoteControlService: ObservableObject {
     @Published var isConnected = false
+    @Published var activePrompt: PromptInfo?
 
-    func start() {
-        isConnected = Self.ensureRCEnabled()
+    private var watchTask: Task<Void, Never>?
+
+    struct PromptInfo: Identifiable, Equatable {
+        let id: String
+        let toolName: String
+        let description: String
+        let options: [(label: String, keystroke: String)]
+        let cwd: String?
+
+        static func == (lhs: PromptInfo, rhs: PromptInfo) -> Bool { lhs.id == rhs.id }
     }
 
-    /// Ensures enableRemoteControl is true in ~/.claude/settings.json
+    private static let promptDir = FileManager.default.temporaryDirectory.path
+    private static let promptPrefix = "agenthub-prompt-"
+
+    func start() {
+        Self.ensureRCEnabled()
+        Self.installHook()
+        // Write presence marker
+        FileManager.default.createFile(
+            atPath: Self.promptDir + "/agenthub-active", contents: nil
+        )
+        isConnected = true
+        startWatching()
+    }
+
+    func stop() {
+        watchTask?.cancel()
+        watchTask = nil
+        isConnected = false
+        try? FileManager.default.removeItem(atPath: Self.promptDir + "/agenthub-active")
+    }
+
+    /// Respond to the current prompt — writes response file that the hook reads
+    func respondToPrompt(allow: Bool) {
+        guard let prompt = activePrompt else { return }
+        let responsePath = Self.promptDir + "/agenthub-response-" + prompt.id + ".json"
+        let decision: [String: Any] = ["decision": allow ? "allow" : "deny"]
+        if let data = try? JSONSerialization.data(withJSONObject: decision) {
+            try? data.write(to: URL(fileURLWithPath: responsePath))
+        }
+        // Clean up prompt file
+        let promptPath = Self.promptDir + "/" + Self.promptPrefix + prompt.id + ".json"
+        try? FileManager.default.removeItem(atPath: promptPath)
+        activePrompt = nil
+    }
+
+    // MARK: - File Watching
+
+    private func startWatching() {
+        watchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.scanForPrompts()
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    private func scanForPrompts() {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: Self.promptDir) else { return }
+
+        for file in files where file.hasPrefix(Self.promptPrefix) && file.hasSuffix(".json") {
+            let uuid = String(file.dropFirst(Self.promptPrefix.count).dropLast(".json".count))
+            if activePrompt?.id == uuid { continue }
+
+            let path = Self.promptDir + "/" + file
+            guard let data = fm.contents(atPath: path),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+
+            let toolName = json["tool_name"] as? String ?? "Unknown"
+            let toolInput = json["tool_input"] as? [String: Any] ?? [:]
+            let cwd = json["_cwd"] as? String
+
+            let desc: String
+            if let cmd = toolInput["command"] as? String {
+                desc = "Bash: \(String(cmd.prefix(80)))"
+            } else if let fp = toolInput["file_path"] as? String {
+                desc = "\(toolName): \(URL(fileURLWithPath: fp).lastPathComponent)"
+            } else {
+                desc = toolName
+            }
+
+            // Claude Code options: 1. Yes  2. Yes + allow rule  3. No
+            let options: [(label: String, keystroke: String)] = [
+                ("Yes", "1\r"),
+                ("Yes, don't ask again", "2\r"),
+                ("No", "3\r")
+            ]
+
+            activePrompt = PromptInfo(
+                id: uuid, toolName: toolName, description: desc,
+                options: options, cwd: cwd
+            )
+            break // one at a time
+        }
+
+        // Clean up stale prompts (>2 min old)
+        for file in files where file.hasPrefix(Self.promptPrefix) && file.hasSuffix(".json") {
+            let path = Self.promptDir + "/" + file
+            if let attrs = try? fm.attributesOfItem(atPath: path),
+               let created = attrs[.creationDate] as? Date,
+               Date().timeIntervalSince(created) > 120 {
+                try? fm.removeItem(atPath: path)
+                if activePrompt?.id == String(file.dropFirst(Self.promptPrefix.count).dropLast(".json".count)) {
+                    activePrompt = nil
+                }
+            }
+        }
+    }
+
+    // MARK: - Hook Installation
+
     @discardableResult
     nonisolated static func ensureRCEnabled() -> Bool {
         let fm = FileManager.default
         let settingsPath = NSHomeDirectory() + "/.claude/settings.json"
+        var settings: [String: Any] = [:]
+        if let data = fm.contents(atPath: settingsPath),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            settings = existing
+        }
+        if settings["enableRemoteControl"] as? Bool != true {
+            settings["enableRemoteControl"] = true
+            if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: URL(fileURLWithPath: settingsPath))
+            }
+        }
+        return true
+    }
 
+    /// Install a minimal PreToolUse hook that writes prompt files for AgentHub
+    nonisolated static func installHook() {
+        let fm = FileManager.default
+        let hooksDir = NSHomeDirectory() + "/.claude/hooks"
+        let scriptPath = hooksDir + "/agenthub-prompt.js"
+
+        if !fm.fileExists(atPath: hooksDir) {
+            try? fm.createDirectory(atPath: hooksDir, withIntermediateDirectories: true)
+        }
+
+        // Write the hook script
+        try? hookScript.write(toFile: scriptPath, atomically: true, encoding: .utf8)
+
+        // Register in settings.json
+        let settingsPath = NSHomeDirectory() + "/.claude/settings.json"
         var settings: [String: Any] = [:]
         if let data = fm.contents(atPath: settingsPath),
            let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             settings = existing
         }
 
-        // Check if already enabled
-        if settings["enableRemoteControl"] as? Bool == true {
-            return true
+        var hooks = settings["hooks"] as? [String: Any] ?? [:]
+        var preToolHooks = hooks["PreToolUse"] as? [[String: Any]] ?? []
+        let alreadyInstalled = preToolHooks.contains { entry in
+            (entry["hooks"] as? [[String: Any]])?.contains {
+                ($0["command"] as? String)?.contains("agenthub-prompt") == true
+            } ?? false
         }
 
-        // Enable it
-        settings["enableRemoteControl"] = true
-        if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: URL(fileURLWithPath: settingsPath))
-        }
-        return true
-    }
-
-    /// Remove the old hook script if it exists (no longer needed — RC web UI handles prompts)
-    nonisolated static func cleanupOldHook() {
-        let fm = FileManager.default
-        let scriptPath = NSHomeDirectory() + "/.claude/hooks/agenthub-prompt.js"
-
-        // Remove hook script
-        if fm.fileExists(atPath: scriptPath) {
-            try? fm.removeItem(atPath: scriptPath)
-        }
-
-        // Remove hook entry from settings.json
-        let settingsPath = NSHomeDirectory() + "/.claude/settings.json"
-        guard let data = fm.contents(atPath: settingsPath),
-              var settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var hooks = settings["hooks"] as? [String: Any],
-              var preToolHooks = hooks["PreToolUse"] as? [[String: Any]]
-        else { return }
-
-        preToolHooks.removeAll { entry in
-            guard let entryHooks = entry["hooks"] as? [[String: Any]] else { return false }
-            return entryHooks.contains { h in
-                (h["command"] as? String)?.contains("agenthub-prompt") == true
+        if !alreadyInstalled {
+            preToolHooks.append([
+                "hooks": [[
+                    "type": "command",
+                    "command": "node \"\(scriptPath)\"",
+                    "timeout": 120000
+                ] as [String: Any]]
+            ] as [String: Any])
+            hooks["PreToolUse"] = preToolHooks
+            settings["hooks"] = hooks
+            if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: URL(fileURLWithPath: settingsPath))
             }
         }
-
-        if preToolHooks.isEmpty {
-            hooks.removeValue(forKey: "PreToolUse")
-        } else {
-            hooks["PreToolUse"] = preToolHooks
-        }
-
-        if hooks.isEmpty {
-            settings.removeValue(forKey: "hooks")
-        } else {
-            settings["hooks"] = hooks
-        }
-
-        if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: URL(fileURLWithPath: settingsPath))
-        }
-
-        // Clean up presence marker
-        try? fm.removeItem(atPath: fm.temporaryDirectory.path + "/agenthub-active")
     }
+
+    /// Non-blocking hook: notifies AgentHub of prompts, doesn't block Claude Code
+    private nonisolated static let hookScript = """
+    #!/usr/bin/env node
+    const fs = require('fs');
+    const crypto = require('crypto');
+    const os = require('os');
+    const tmpDir = os.tmpdir();
+
+    try {
+      if (!fs.existsSync(tmpDir + '/agenthub-active')) process.exit(0);
+
+      const input = fs.readFileSync('/dev/stdin', 'utf8');
+      if (!input.trim()) process.exit(0);
+
+      const data = JSON.parse(input);
+      const mode = data.permission_mode || 'default';
+
+      // Only notify in default/plan mode (these are the modes that show permission dialogs)
+      if (!['default', 'plan'].includes(mode)) process.exit(0);
+
+      // Only for tools that show permission prompts
+      if (!['Bash', 'Write', 'Edit'].includes(data.tool_name || '')) process.exit(0);
+
+      // Write prompt file for AgentHub (non-blocking)
+      const uuid = crypto.randomUUID();
+      data._cwd = process.cwd();
+      data._uuid = uuid;
+      fs.writeFileSync(
+        tmpDir + '/agenthub-prompt-' + uuid + '.json',
+        JSON.stringify(data, null, 2)
+      );
+
+      // Exit immediately — Claude Code shows its normal prompt
+      // AgentHub will send the response via CGEvent keystroke
+      process.exit(0);
+    } catch(e) {
+      process.exit(0);
+    }
+    """
 }

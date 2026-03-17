@@ -49,11 +49,8 @@ final class WindowManager: ObservableObject {
             }
         }
 
-        // Ensure RC is enabled and clean up old hook system
+        // Start RC service (hook installation + prompt watching)
         rcService.start()
-        RemoteControlService.cleanupOldHook()
-
-        // RC setup done via TerminalBridgeService in CompactDashboardView
 
         // Start speech + network
         speechService.requestPermission()
