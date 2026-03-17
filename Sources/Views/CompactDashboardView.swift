@@ -31,28 +31,30 @@ struct CompactDashboardView: View {
         windowManager.rcService.activePrompt
     }
 
-    /// Windows to show in the floating panel — exclude the frontmost one
-    private var visibleWindows: [MonitoredWindow] {
-        let frontApp = NSWorkspace.shared.frontmostApplication
-        return windowManager.monitoredWindows.filter { window in
-            // Hide windows belonging to the frontmost app
-            if let frontBundleID = frontApp?.bundleIdentifier,
-               let windowBundleID = window.bundleIdentifier,
-               frontBundleID == windowBundleID {
-                // Same app — check if this specific window title matches the frontmost
-                // For multi-window apps like VS Code, only hide the active instance
-                if let frontName = frontApp?.localizedName,
-                   window.ownerName == frontName {
-                    // If only one window from this app, hide it
-                    let sameAppWindows = windowManager.monitoredWindows.filter { $0.bundleIdentifier == windowBundleID }
-                    if sameAppWindows.count <= 1 { return false }
-                    // Multiple windows — show all (we can't tell which is focused)
-                    return true
-                }
-                return false
-            }
-            return true
+    /// The frontmost window ID detected via CGWindowList
+    private var frontmostWindowID: CGWindowID? {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
+        let pid = frontApp.processIdentifier
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        // Find the topmost window belonging to the frontmost app
+        for info in windowList {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == pid,
+                  let windowID = info[kCGWindowNumber as String] as? CGWindowID,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let w = bounds["Width"] as? CGFloat, w > 200
+            else { continue }
+            return windowID
         }
+        return nil
+    }
+
+    /// Windows to show in the floating panel — exclude the specific frontmost window
+    private var visibleWindows: [MonitoredWindow] {
+        let frontID = frontmostWindowID
+        return windowManager.monitoredWindows.filter { $0.id != frontID }
     }
 
     var body: some View {
@@ -325,15 +327,22 @@ struct CompactDashboardView: View {
         .background(Color(white: 0.1))
     }
 
+    /// Target for commands: the frontmost monitored window (what user is working in)
+    private var commandTarget: MonitoredWindow? {
+        if let frontID = frontmostWindowID,
+           let w = windowManager.monitoredWindows.first(where: { $0.id == frontID }) {
+            return w
+        }
+        return selectedWindow
+    }
+
     private func sendMessage() {
         let text = messageText.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return }
-        guard let window = selectedWindow else { return }
+        guard let window = commandTarget else { return }
         messageText = ""
-        // Force-clear any NSTextField showing our text
         NotificationCenter.default.post(name: .init("AgentHubClearInput"), object: nil)
 
-        // Get the target app's PID
         let pid = Self.findPID(for: window)
 
         // Bring window to front
