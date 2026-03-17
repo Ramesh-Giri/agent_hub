@@ -84,13 +84,25 @@ struct CompactDashboardView: View {
                         }
                         .frame(maxHeight: .infinity)
                 } else {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        let cols = visibleWindows.count == 1
-                            ? [GridItem(.flexible())]
-                            : [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)]
-                        LazyVGrid(columns: cols, spacing: 4) {
-                            ForEach(visibleWindows) { window in
-                                floatingWindowCard(window)
+                    // Google Meet-style: tiles fill all available space
+                    GeometryReader { geo in
+                        let count = visibleWindows.count
+                        let cols = count <= 1 ? 1 : 2
+                        let rows = max(1, Int(ceil(Double(count) / Double(cols))))
+                        let tileW = (geo.size.width - CGFloat(cols + 1) * 4) / CGFloat(cols)
+                        let tileH = (geo.size.height - CGFloat(rows + 1) * 4) / CGFloat(rows)
+
+                        VStack(spacing: 4) {
+                            ForEach(0..<rows, id: \.self) { row in
+                                HStack(spacing: 4) {
+                                    ForEach(0..<cols, id: \.self) { col in
+                                        let idx = row * cols + col
+                                        if idx < count {
+                                            floatingWindowCard(visibleWindows[idx])
+                                                .frame(width: tileW, height: tileH)
+                                        }
+                                    }
+                                }
                             }
                         }
                         .padding(4)
@@ -159,8 +171,24 @@ struct CompactDashboardView: View {
 
     private func floatingWindowCard(_ window: MonitoredWindow) -> some View {
         let isPromptSource = promptMatchesWindow(hookPrompt, window: window)
-        return VStack(spacing: 0) {
-            // Title bar
+        return ZStack(alignment: .topLeading) {
+            // Screenshot fills entire tile
+            if let screenshot = windowManager.screenshots[window.id] {
+                Image(nsImage: screenshot)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else {
+                Color(white: 0.08)
+                    .overlay {
+                        Image(systemName: "terminal")
+                            .font(.title2)
+                            .foregroundStyle(.gray.opacity(0.3))
+                    }
+            }
+
+            // Overlay title bar (semi-transparent)
             HStack(spacing: 4) {
                 if let icon = window.icon {
                     Image(nsImage: icon).resizable().frame(width: 12, height: 12)
@@ -169,6 +197,7 @@ struct CompactDashboardView: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
+                    .shadow(color: .black, radius: 2)
                 Spacer()
                 if isPromptSource {
                     Circle().fill(.orange).frame(width: 6, height: 6)
@@ -176,26 +205,14 @@ struct CompactDashboardView: View {
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
-            .background(Color(white: 0.15))
-
-            // Screenshot
-            if let screenshot = windowManager.screenshots[window.id] {
-                Image(nsImage: screenshot)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-            } else {
-                Color(white: 0.08)
-                    .aspectRatio(16/10, contentMode: .fit)
-                    .overlay {
-                        Image(systemName: "terminal").foregroundStyle(.gray.opacity(0.3))
-                    }
-            }
+            .background(
+                LinearGradient(colors: [.black.opacity(0.7), .clear], startPoint: .top, endPoint: .bottom)
+            )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(isPromptSource ? .orange : .white.opacity(0.1), lineWidth: isPromptSource ? 2 : 1)
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isPromptSource ? .orange : .white.opacity(0.08), lineWidth: isPromptSource ? 2 : 1)
         )
         .contentShape(Rectangle())
         .onTapGesture {
