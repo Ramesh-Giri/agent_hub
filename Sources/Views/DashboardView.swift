@@ -18,6 +18,13 @@ struct DashboardView: View {
         windowManager.rcService.activePrompt
     }
 
+    private func promptMatchesWindow(_ prompt: RemoteControlService.PromptInfo?, window: MonitoredWindow) -> Bool {
+        guard let cwd = prompt?.cwd else { return false }
+        let project = URL(fileURLWithPath: cwd).lastPathComponent
+        return window.windowTitle.localizedCaseInsensitiveContains(project) ||
+               window.displayName.localizedCaseInsensitiveContains(project)
+    }
+
     var body: some View {
         ZStack {
             Color(.windowBackgroundColor)
@@ -36,12 +43,21 @@ struct DashboardView: View {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 12) {
                             ForEach(windowManager.monitoredWindows) { window in
+                                let isPromptSource = promptMatchesWindow(hookPrompt, window: window)
                                 WindowThumbnailView(
                                     window: window,
                                     screenshot: windowManager.screenshots[window.id],
-                                    onSelect: { selectedWindow = window },
+                                    onSelect: {
+                                        selectedWindow = window
+                                        windowManager.bringWindowToFront(window)
+                                    },
                                     onRemove: { windowManager.removeWindow(window) }
                                 )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(isPromptSource ? .orange : (selectedWindow?.id == window.id ? .blue : .clear), lineWidth: isPromptSource ? 3 : 2)
+                                )
+                                .shadow(color: isPromptSource ? .orange.opacity(0.4) : .clear, radius: 8)
                             }
                         }
                         .padding(16)
@@ -121,10 +137,6 @@ struct DashboardView: View {
         }
         .sheet(isPresented: $showingWindowPicker) {
             WindowPickerView()
-                .environmentObject(windowManager)
-        }
-        .sheet(item: $selectedWindow) { window in
-            InteractionSheet(window: window)
                 .environmentObject(windowManager)
         }
         .navigationTitle("AgentHub")
