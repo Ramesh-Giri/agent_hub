@@ -11,7 +11,7 @@ DerivedData/
 
 # App bundles
 *.app/
-
+''
 # Certificates
 *.p12
 *.cer

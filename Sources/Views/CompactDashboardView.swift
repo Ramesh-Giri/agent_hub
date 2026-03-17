@@ -1,16 +1,294 @@
 import SwiftUI
+import WebKit
+
+// MARK: - Shared WKWebView (hidden, acts as communication bridge)
+
+@MainActor
+final class SharedRCWebView: ObservableObject {
+    static let shared = SharedRCWebView()
+    static let rcURL = URL(string: "https://claude.ai/code")!
+
+    let webView: WKWebView
+    private let delegate = RCWebViewDelegate()
+
+    @Published var isConnected = false
+    @Published var lastResponse = ""
+    @Published var sessionName = "Connecting..."
+    @Published var actionButtons: [String] = []  // Dynamic buttons from the web UI
+
+    private init() {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
+        let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 1, height: 1), configuration: config)
+        wv.navigationDelegate = delegate
+        wv.uiDelegate = delegate
+        wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+        self.webView = wv
+        delegate.owner = self
+
+        BrowserCookieService.injectBrowserCookies(into: wv, for: "claude.ai") {
+            wv.load(URLRequest(url: Self.rcURL))
+        }
+    }
+
+    func reload() {
+        BrowserCookieService.injectBrowserCookies(into: webView, for: "claude.ai") { [weak self] in
+            self?.webView.load(URLRequest(url: Self.rcURL))
+        }
+    }
+
+    /// Send a message via the RC web interface
+    func sendMessage(_ text: String) {
+        let escaped = text.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        let js = """
+        (function() {
+            // Find visible textarea or contenteditable
+            const textareas = document.querySelectorAll('textarea');
+            let input = null;
+            for (const t of textareas) {
+                if (t.offsetParent !== null) { input = t; break; }
+            }
+            if (!input) {
+                const editables = document.querySelectorAll('[contenteditable="true"]');
+                for (const e of editables) {
+                    if (e.offsetParent !== null) { input = e; break; }
+                }
+            }
+            if (!input) return 'no_input_found';
+
+            // For React: use native setter + React's input event
+            if (input.tagName === 'TEXTAREA') {
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                nativeSetter.call(input, '\(escaped)');
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+            } else {
+                input.focus();
+                input.textContent = '\(escaped)';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+
+            // Find and click the send/submit button
+            setTimeout(() => {
+                // Try form submit
+                const form = input.closest('form');
+                if (form) {
+                    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                }
+                // Try clicking send button (usually has an arrow-up SVG icon)
+                const buttons = document.querySelectorAll('button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]');
+                for (const btn of buttons) {
+                    if (btn.offsetParent !== null) { btn.click(); return; }
+                }
+                // Fallback: find button near the textarea
+                const parent = input.closest('div') || input.parentElement;
+                if (parent) {
+                    const nearButtons = parent.querySelectorAll('button');
+                    for (const btn of nearButtons) {
+                        if (btn.offsetParent !== null && btn.querySelector('svg')) {
+                            btn.click(); return;
+                        }
+                    }
+                }
+                // Last resort: Enter keypress
+                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+            }, 300);
+            return 'sent';
+        })();
+        """
+        webView.evaluateJavaScript(js) { result, error in
+            if let r = result as? String { NSLog("[AgentHub RC] send: %@", r) }
+            if let e = error { NSLog("[AgentHub RC] error: %@", e.localizedDescription) }
+        }
+    }
+
+    /// Click a specific action button in the web UI by its label
+    func clickAction(_ label: String) {
+        let escaped = label.replacingOccurrences(of: "'", with: "\\'")
+        let js = """
+        (function() {
+            const buttons = document.querySelectorAll('button');
+            for (const btn of buttons) {
+                const text = btn.textContent.trim();
+                if (text === '\(escaped)' && btn.offsetParent !== null) {
+                    btn.click();
+                    return 'clicked: ' + text;
+                }
+            }
+            // Try partial match
+            for (const btn of buttons) {
+                const text = btn.textContent.trim().toLowerCase();
+                if (text.includes('\(escaped.lowercased())') && btn.offsetParent !== null) {
+                    btn.click();
+                    return 'clicked_partial: ' + btn.textContent.trim();
+                }
+            }
+            return 'not_found';
+        })();
+        """
+        webView.evaluateJavaScript(js) { result, _ in
+            if let r = result as? String { NSLog("[AgentHub RC] action: %@", r) }
+        }
+    }
+
+    /// Poll for status, last response, and available action buttons
+    func pollStatus() {
+        let js = """
+        (function() {
+            // Check if input exists (connected)
+            const hasInput = document.querySelector('textarea') !== null ||
+                            document.querySelector('[contenteditable="true"]') !== null;
+
+            // Get last visible text block (response)
+            let lastMsg = '';
+            const paras = document.querySelectorAll('p, span, div');
+            for (const el of paras) {
+                if (el.children.length > 2) continue;
+                const txt = el.textContent.trim();
+                if (txt.length > 10 && txt.length < 300 && el.offsetParent !== null) {
+                    lastMsg = txt;
+                }
+            }
+
+            // Find action buttons — ONLY permission/response buttons, not UI chrome
+            const actionLabels = [];
+            const skipWords = ['share', 'copy', 'edit', 'new session', 'sign in', 'log in',
+                              'download', 'all projects', 'search', 'settings', 'menu',
+                              'close', 'back', 'opus', 'sonnet', 'haiku', 'auto accept',
+                              'macbook', 'projects'];
+            const allowWords = ['yes', 'no', 'allow', 'deny', 'continue', 'approve',
+                               'reject', 'accept', 'cancel', 'retry', 'skip', 'stop',
+                               'proceed', 'confirm'];
+            const buttons = document.querySelectorAll('button');
+            for (const btn of buttons) {
+                if (btn.offsetParent === null) continue;
+                const txt = btn.textContent.trim();
+                if (txt.length < 2 || txt.length > 25) continue;
+                const lower = txt.toLowerCase();
+                // Skip known UI chrome
+                if (skipWords.some(w => lower.includes(w))) continue;
+                // Skip single/two letter buttons (initials like "RG")
+                if (txt.length <= 2) continue;
+                // Skip icon-only buttons
+                if (btn.querySelector('svg') && txt.length < 4) continue;
+                // Only include if it matches known action words
+                if (allowWords.some(w => lower.includes(w))) {
+                    actionLabels.push(txt);
+                }
+            }
+
+            return JSON.stringify({ hasInput, lastMsg, actions: actionLabels });
+        })();
+        """
+        webView.evaluateJavaScript(js) { [weak self] result, _ in
+            guard let json = result as? String,
+                  let data = json.data(using: .utf8),
+                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            DispatchQueue.main.async {
+                self?.isConnected = dict["hasInput"] as? Bool ?? false
+                if let msg = dict["lastMsg"] as? String, !msg.isEmpty {
+                    self?.lastResponse = msg
+                }
+                if let actions = dict["actions"] as? [String] {
+                    // Only update if changed (avoid UI flicker)
+                    let unique = Array(Set(actions))
+                    if unique != self?.actionButtons {
+                        self?.actionButtons = unique
+                    }
+                }
+            }
+        }
+    }
+}
+
+class RCWebViewDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
+    weak var mainWebView: WKWebView?
+    weak var owner: SharedRCWebView?
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            webView.load(URLRequest(url: url))
+        }
+        return nil
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard let url = webView.url?.absoluteString else { return }
+        let isSessionList = url.hasSuffix("/code") || url.hasSuffix("/code/")
+
+        if isSessionList {
+            // Auto-navigate to first session
+            let js = """
+            (function() {
+                let attempts = 0;
+                const tryNav = () => {
+                    attempts++;
+                    // Find all links and try to match session detail URLs
+                    const links = document.querySelectorAll('a');
+                    for (const a of links) {
+                        const href = a.getAttribute('href') || '';
+                        // Match /code/<uuid> or /code/<any-id>
+                        if (href.includes('/code/') && href !== '/code/' && href.length > 10) {
+                            const parts = href.split('/code/');
+                            if (parts[1] && parts[1].length > 5) {
+                                window.location.href = href;
+                                return;
+                            }
+                        }
+                    }
+                    // Fallback: click on any element containing "session" text
+                    if (attempts > 10) {
+                        const els = document.querySelectorAll('a, div[role="button"], button');
+                        for (const el of els) {
+                            const txt = el.textContent.trim().toLowerCase();
+                            if ((txt.includes('session') || txt.includes('interactive'))
+                                && el.offsetParent !== null
+                                && el.closest('a')) {
+                                el.closest('a').click();
+                                return;
+                            }
+                        }
+                    }
+                    if (attempts < 60) setTimeout(tryNav, 500);
+                };
+                setTimeout(tryNav, 800);
+            })();
+            """
+            webView.evaluateJavaScript(js)
+        } else {
+            // On session detail — mark connected and start polling
+            DispatchQueue.main.async { [weak self] in
+                self?.owner?.isConnected = true
+                self?.owner?.sessionName = "Connected"
+                self?.owner?.pollStatus()
+            }
+        }
+    }
+}
+
+// MARK: - Floating Panel View
 
 struct CompactDashboardView: View {
     @EnvironmentObject var windowManager: WindowManager
+    @ObservedObject var rc = SharedRCWebView.shared
     let onExpand: () -> Void
     var onMinimize: (() -> Void)? = nil
     var onRestore: (() -> Void)? = nil
 
-    @State private var selectedWindowID: CGWindowID?
-    @State private var commandText = ""
     @State private var isMinimized = false
-
-    private var rcService: RemoteControlService { windowManager.rcService }
+    @State private var showRC = true
+    @State private var messageText = ""
+    @State private var selectedWindowID: CGWindowID?
 
     private var selectedWindow: MonitoredWindow? {
         let windows = windowManager.monitoredWindows
@@ -18,32 +296,14 @@ struct CompactDashboardView: View {
         return windows.first
     }
 
-    /// Total prompt count across all queues
-    private var totalPromptCount: Int {
-        rcService.pendingPrompts.count + (rcService.activePrompt != nil ? 1 : 0)
-    }
-
-    /// The prompt that belongs to the currently selected window (by matching project name to window title)
-    private var promptForSelectedWindow: RemoteControlService.ControlPrompt? {
-        guard let selected = selectedWindow else { return nil }
-        // Check active prompt
-        if let prompt = rcService.activePrompt, promptMatchesWindow(prompt, window: selected) {
-            return prompt
+    private var projectName: String {
+        guard let window = selectedWindow else { return "Remote Control" }
+        let title = window.windowTitle
+        if let lastDash = title.range(of: " — ", options: .backwards) {
+            return String(title[lastDash.upperBound...])
         }
-        // Check pending prompts
-        return rcService.pendingPrompts.first { promptMatchesWindow($0, window: selected) }
-    }
-
-    /// Does this window have a prompt waiting?
-    private func windowHasPrompt(_ window: MonitoredWindow) -> Bool {
-        if let prompt = rcService.activePrompt, promptMatchesWindow(prompt, window: window) { return true }
-        return rcService.pendingPrompts.contains { promptMatchesWindow($0, window: window) }
-    }
-
-    private func promptMatchesWindow(_ prompt: RemoteControlService.ControlPrompt, window: MonitoredWindow) -> Bool {
-        guard let project = prompt.projectName else { return false }
-        return window.windowTitle.localizedCaseInsensitiveContains(project) ||
-               window.displayName.localizedCaseInsensitiveContains(project)
+        if !title.isEmpty { return title }
+        return window.ownerName
     }
 
     var body: some View {
@@ -51,49 +311,22 @@ struct CompactDashboardView: View {
             if isMinimized {
                 minimizedPill
             } else {
-                DragHandleBar(
-                    onExpand: onExpand,
-                    rcConnected: rcService.isConnected,
-                    pendingCount: totalPromptCount,
-                    onMinimize: {
-                        isMinimized = true
-                        onMinimize?()
+                dragBar
+
+                ZStack(alignment: .bottom) {
+                    // Live window screenshot
+                    windowScreenshot
+
+                    // Native RC input overlay
+                    if showRC {
+                        rcOverlay
                     }
-                )
-
-                // RC Prompt — only show if the selected window has one
-                if let prompt = promptForSelectedWindow {
-                    promptCard(prompt)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                if windowManager.monitoredWindows.isEmpty {
-                    emptyState
-                } else {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(spacing: 4) {
-                            ForEach(windowManager.monitoredWindows) { window in
-                                CompactWindowCard(
-                                    window: window,
-                                    screenshot: windowManager.screenshots[window.id],
-                                    attention: windowManager.attentionService.attentionWindows[window.id],
-                                    isSelected: selectedWindow?.id == window.id,
-                                    rcConnected: rcService.isConnected,
-                                    hasPrompt: windowHasPrompt(window),
-                                    onSelect: { selectedWindowID = window.id },
-                                    onBringToFront: { windowManager.bringWindowToFront(window) }
-                                )
-                            }
-                        }
-                        .padding(6)
-                    }
-
-                    Divider()
-                    commandField
-                }
-
-                // RC status
-                if !rcService.isConnected {
-                    rcStatusBar
+                // Window tabs
+                if windowManager.monitoredWindows.count > 1 {
+                    windowTabs
                 }
             }
         }
@@ -101,468 +334,224 @@ struct CompactDashboardView: View {
         .background(.ultraThinMaterial)
         .onAppear {
             Task { await windowManager.autoDiscoverAgentWindows() }
+            // Start polling
+            startStatusPolling()
         }
-        .onChange(of: rcService.activePrompt?.id) { _, _ in
-            guard let prompt = rcService.activePrompt else { return }
-            // Auto-restore if minimized
-            if isMinimized {
-                isMinimized = false
-                onRestore?()
-            }
-            // Auto-select the matching window
-            if let project = prompt.projectName {
-                if let match = windowManager.monitoredWindows.first(where: {
-                    $0.windowTitle.localizedCaseInsensitiveContains(project) ||
-                    $0.displayName.localizedCaseInsensitiveContains(project)
-                }) {
-                    selectedWindowID = match.id
-                }
+    }
+
+    private func startStatusPolling() {
+        Task {
+            while true {
+                try? await Task.sleep(for: .seconds(3))
+                rc.pollStatus()
             }
         }
     }
 
-    // MARK: - Minimized Pill
+    // MARK: - RC Overlay (native SwiftUI)
 
-    private var minimizedPill: some View {
-        HStack(spacing: 8) {
-            // RC status dot
-            if rcService.isConnected {
-                Circle().fill(.green).frame(width: 6, height: 6)
-            } else {
-                Circle().fill(.gray).frame(width: 6, height: 6)
-            }
-
-            // Window count
-            let count = windowManager.monitoredWindows.count
-            Text(count > 0 ? "\(count) window\(count == 1 ? "" : "s")" : "AgentHub")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.9))
-
-            // Attention badge
-            let attentionCount = windowManager.attentionService.attentionWindows.count
-            if attentionCount > 0 {
-                Text("\(attentionCount)")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(.orange)
-                    .clipShape(Capsule())
-            }
-
-            Spacer()
-
-            // Restore button
-            TapIconButton(
-                systemName: "chevron.up.2",
-                action: {
-                    isMinimized = false
-                    onRestore?()
-                },
-                color: .white
-            )
-
-            // Expand to full app
-            TapIconButton(systemName: "arrow.up.left.and.arrow.down.right", action: onExpand, color: .white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.black.opacity(0.5))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            isMinimized = false
-            onRestore?()
-        }
-    }
-
-    // MARK: - RC Prompt Card
-
-    private func promptCard(_ prompt: RemoteControlService.ControlPrompt) -> some View {
-        VStack(spacing: 8) {
-            // Project badge
-            if let project = prompt.projectName {
-                HStack(spacing: 4) {
-                    Image(systemName: "folder.fill")
-                        .font(.system(size: 9))
-                    Text(project)
-                        .font(.system(size: 10, weight: .bold))
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(.blue.opacity(0.6))
-                .clipShape(Capsule())
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            // Header
+    private var rcOverlay: some View {
+        VStack(spacing: 0) {
+            // Project name + status
             HStack(spacing: 6) {
-                Image(systemName: prompt.isAskQuestion ? "questionmark.circle.fill" : "lock.shield.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(prompt.isAskQuestion ? .purple : .blue)
-                Text(prompt.displayText)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            // Tool details (for non-ask prompts)
-            if !prompt.isAskQuestion {
-                toolDetailView(prompt)
-            }
-
-            // Action buttons
-            if prompt.isAskQuestion {
-                askQuestionButtons(prompt)
-            } else {
-                permissionButtons(prompt)
-            }
-        }
-        .padding(10)
-        .background(prompt.isAskQuestion ? .purple.opacity(0.08) : .blue.opacity(0.08))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(prompt.isAskQuestion ? .purple.opacity(0.3) : .blue.opacity(0.3), lineWidth: 1)
-        )
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-    }
-
-    /// Shows tool input details (command, file path, etc.)
-    @ViewBuilder
-    private func toolDetailView(_ prompt: RemoteControlService.ControlPrompt) -> some View {
-        if let command = prompt.toolInput["command"] as? String {
-            Text(command)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(6)
-                .background(Color(.textBackgroundColor).opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-        } else if let filePath = prompt.toolInput["file_path"] as? String {
-            HStack(spacing: 4) {
-                Image(systemName: "doc.text")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                Text(filePath)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    /// Permission buttons: Allow, Always Allow (from suggestions), Deny
-    private func permissionButtons(_ prompt: RemoteControlService.ControlPrompt) -> some View {
-        VStack(spacing: 6) {
-            // Primary row: Allow + Deny
-            HStack(spacing: 8) {
-                TapButton(
-                    label: "Allow",
-                    action: { rcService.respondToPrompt(allow: true) },
-                    color: .white, bgColor: .green,
-                    font: .system(size: 11, weight: .bold)
-                )
-                TapButton(
-                    label: "Deny",
-                    action: { rcService.respondToPrompt(allow: false) },
-                    color: .white, bgColor: .red,
-                    font: .system(size: 11, weight: .bold)
-                )
-            }
-
-            // Permission suggestion buttons (Always Allow, Don't Ask Again, etc.)
-            if !prompt.permissionSuggestions.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(prompt.permissionSuggestions) { suggestion in
-                        TapButton(
-                            label: suggestion.label,
-                            action: { rcService.respondToPrompt(allow: true, applySuggestion: suggestion) },
-                            color: .blue,
-                            bgColor: .blue.opacity(0.12),
-                            font: .system(size: 10, weight: .semibold)
-                        )
-                    }
+                Circle()
+                    .fill(rc.isConnected ? .green : .orange)
+                    .frame(width: 6, height: 6)
+                if let window = selectedWindow, let icon = window.icon {
+                    Image(nsImage: icon).resizable().frame(width: 12, height: 12)
                 }
-            }
-        }
-    }
-
-    /// AskUserQuestion buttons: exact options from the API
-    private func askQuestionButtons(_ prompt: RemoteControlService.ControlPrompt) -> some View {
-        VStack(spacing: 4) {
-            ForEach(prompt.askOptions) { option in
-                TapButton(
-                    label: option.label,
-                    action: { rcService.respondToQuestion(answer: option.label) },
-                    color: .white,
-                    bgColor: .purple.opacity(0.7),
-                    font: .system(size: 11, weight: .semibold)
-                )
-                .frame(maxWidth: .infinity)
-            }
-
-            // Fallback if no options parsed — just allow/deny
-            if prompt.askOptions.isEmpty {
-                HStack(spacing: 8) {
-                    TapButton(
-                        label: "Allow",
-                        action: { rcService.respondToPrompt(allow: true) },
-                        color: .white, bgColor: .green,
-                        font: .system(size: 11, weight: .bold)
-                    )
-                    TapButton(
-                        label: "Deny",
-                        action: { rcService.respondToPrompt(allow: false) },
-                        color: .white, bgColor: .red,
-                        font: .system(size: 11, weight: .bold)
-                    )
-                }
-            }
-        }
-    }
-
-    // MARK: - Command Field
-
-    private var commandField: some View {
-        HStack(spacing: 6) {
-            if let window = selectedWindow, let icon = window.icon {
-                Image(nsImage: icon).resizable().frame(width: 14, height: 14)
-            }
-
-            if promptForSelectedWindow != nil {
-                // Only block when THIS window has a prompt
-                Text("Waiting for prompt response...")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                TextField(
-                    selectedWindow.map { "Send to \($0.displayName)..." } ?? "Select a window...",
-                    text: $commandText
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: 12, design: .monospaced))
-                .onSubmit { sendCommand() }
-
-                if !commandText.isEmpty {
-                    TapIconButton(systemName: "return", action: sendCommand, color: .blue)
-                }
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.bar)
-    }
-
-    // MARK: - RC Status
-
-    private var rcStatusBar: some View {
-        HStack(spacing: 6) {
-            if let error = rcService.error {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.orange)
-                Text(error)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                Text(projectName)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
                     .lineLimit(1)
                 Spacer()
-                TapButton(label: "Retry", action: { rcService.start() },
-                          font: .system(size: 9, weight: .semibold))
-            } else {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                Text("Hook not active — waiting for prompts")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                if let window = selectedWindow {
+                    TapIconButton(
+                        systemName: "macwindow",
+                        action: { windowManager.bringWindowToFront(window) },
+                        color: .white.opacity(0.6)
+                    )
+                }
             }
-            Spacer()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.black.opacity(0.7))
+
+            // Message input field
+            HStack(spacing: 6) {
+                TextField("Send a message...", text: $messageText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(.white.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .onSubmit { sendMessage() }
+
+                TapIconButton(
+                    systemName: "arrow.up.circle.fill",
+                    action: sendMessage,
+                    color: messageText.isEmpty ? .gray : .blue
+                )
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.6))
+
+            // Dynamic action buttons (only when available)
+            if !rc.actionButtons.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(rc.actionButtons, id: \.self) { label in
+                            TapButton(
+                                label: label,
+                                action: { rc.clickAction(label) },
+                                color: .white,
+                                bgColor: buttonColor(for: label),
+                                font: .system(size: 10, weight: .semibold)
+                            )
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
+                .background(.black.opacity(0.6))
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.white.opacity(0.15), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.4), radius: 6)
+        .padding(.horizontal, 4)
+        .padding(.bottom, 4)
+        .transition(.move(edge: .bottom))
+    }
+
+    private func buttonColor(for label: String) -> Color {
+        let l = label.lowercased()
+        if l.contains("yes") || l.contains("allow") || l.contains("accept") { return .green.opacity(0.6) }
+        if l.contains("no") || l.contains("deny") || l.contains("reject") { return .red.opacity(0.6) }
+        return .blue.opacity(0.5)
+    }
+
+    private func sendMessage() {
+        guard !messageText.isEmpty else { return }
+        rc.sendMessage(messageText)
+        messageText = ""
+    }
+
+    // MARK: - Window Screenshot
+
+    private var windowScreenshot: some View {
+        Group {
+            if let window = selectedWindow, let screenshot = windowManager.screenshots[window.id] {
+                Image(nsImage: screenshot)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .contentShape(Rectangle())
+                    .onTapGesture { windowManager.bringWindowToFront(window) }
+            } else {
+                Color.black.opacity(0.3)
+                    .overlay {
+                        VStack(spacing: 8) {
+                            Image(systemName: "rectangle.on.rectangle.angled")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.tertiary)
+                            Text("No windows detected")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+            }
+        }
+    }
+
+    // MARK: - Window Tabs
+
+    private var windowTabs: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(windowManager.monitoredWindows) { window in
+                    HStack(spacing: 4) {
+                        if let icon = window.icon {
+                            Image(nsImage: icon).resizable().frame(width: 12, height: 12)
+                        }
+                        Text(window.ownerName)
+                            .font(.system(size: 9, weight: .medium))
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(selectedWindow?.id == window.id ? .white.opacity(0.15) : .clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedWindowID = window.id }
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+        }
         .background(.bar)
     }
 
-    // MARK: - Empty / Actions
+    // MARK: - Drag Bar
 
-    private var emptyState: some View {
-        VStack(spacing: 8) {
-            Spacer()
-            Image(systemName: "rectangle.on.rectangle.angled")
-                .font(.system(size: 24))
-                .foregroundStyle(.tertiary)
-            Text("No agent windows")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-            TapButton(label: "Add Windows", action: onExpand,
-                      color: .blue, font: .system(size: 10, weight: .medium))
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func sendCommand() {
-        guard let window = selectedWindow else { return }
-        // Bring the window to front — keystroke injection doesn't work with Claude Code's Ink terminal
-        windowManager.bringWindowToFront(window)
-        commandText = ""
-    }
-}
-
-// MARK: - Drag Bar
-
-struct DragHandleBar: View {
-    let onExpand: () -> Void
-    var rcConnected: Bool = false
-    var pendingCount: Int = 0
-    var onMinimize: (() -> Void)? = nil
-
-    var body: some View {
-        HStack(spacing: 0) {
+    private var dragBar: some View {
+        HStack(spacing: 4) {
             RoundedRectangle(cornerRadius: 2)
                 .fill(.white.opacity(0.3))
                 .frame(width: 36, height: 4)
                 .padding(.leading, 12)
 
-            if rcConnected {
-                HStack(spacing: 3) {
-                    Circle().fill(.green).frame(width: 5, height: 5)
-                    Text("RC").font(.system(size: 9, weight: .bold)).foregroundStyle(.green)
-                }
-                .padding(.leading, 8)
-            }
-
-            if pendingCount > 0 {
-                Text("\(pendingCount)")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(.orange)
-                    .clipShape(Capsule())
-                    .padding(.leading, 6)
-            }
-
             Spacer()
 
-            // Minimize to pill
             TapIconButton(
-                systemName: "chevron.down.2",
-                action: { onMinimize?() },
+                systemName: showRC ? "message.fill" : "message",
+                action: { withAnimation(.easeInOut(duration: 0.2)) { showRC.toggle() } },
+                color: showRC ? .blue : .white
+            )
+
+            TapIconButton(
+                systemName: "arrow.clockwise",
+                action: { rc.reload() },
                 color: .white
             )
-            .padding(.trailing, 4)
 
-            // Expand to full app
+            TapIconButton(
+                systemName: "chevron.down.2",
+                action: { isMinimized = true; onMinimize?() },
+                color: .white
+            )
+
             TapIconButton(systemName: "arrow.up.left.and.arrow.down.right", action: onExpand, color: .white)
                 .padding(.trailing, 8)
         }
         .frame(height: 28)
         .background(.black.opacity(0.4))
     }
-}
 
-// MARK: - Window Card
+    // MARK: - Minimized Pill
 
-struct CompactWindowCard: View {
-    let window: MonitoredWindow
-    let screenshot: NSImage?
-    let attention: WindowAttention?
-    let isSelected: Bool
-    let rcConnected: Bool
-    var hasPrompt: Bool = false
-    let onSelect: () -> Void
-    let onBringToFront: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                if let icon = window.icon {
-                    Image(nsImage: icon).resizable().frame(width: 16, height: 16)
-                }
-                Text(window.displayName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Spacer()
-                if rcConnected {
-                    Text("RC")
-                        .font(.system(size: 8, weight: .heavy))
-                        .foregroundStyle(.green)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(.green.opacity(0.15))
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-                }
-                if hasPrompt {
-                    // Pulsing indicator for active prompt
-                    Circle()
-                        .fill(.blue)
-                        .frame(width: 8, height: 8)
-                        .overlay(
-                            Circle()
-                                .stroke(.blue.opacity(0.5), lineWidth: 2)
-                                .scaleEffect(1.5)
-                        )
-                } else if attention != nil {
-                    Circle().fill(.orange).frame(width: 8, height: 8)
-                }
-                TapIconButton(systemName: "macwindow", action: onBringToFront)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.bar)
-
-            Group {
-                if let screenshot {
-                    Image(nsImage: screenshot)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity)
-                } else {
-                    Rectangle()
-                        .fill(.quaternary)
-                        .aspectRatio(16/10, contentMode: .fit)
-                        .frame(maxWidth: .infinity)
-                        .overlay {
-                            Image(systemName: "terminal").font(.title2).foregroundStyle(.tertiary)
-                        }
-                }
-            }
-
-            if let attention {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
-                    Text(attention.promptText ?? attention.reason.rawValue)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.orange)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.orange.opacity(0.06))
-            }
+    private var minimizedPill: some View {
+        HStack(spacing: 8) {
+            Circle().fill(rc.isConnected ? .green : .orange).frame(width: 6, height: 6)
+            let count = windowManager.monitoredWindows.count
+            Text(count > 0 ? "\(count) window\(count == 1 ? "" : "s")" : "AgentHub")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
+            Spacer()
+            TapIconButton(systemName: "chevron.up.2", action: { isMinimized = false; onRestore?() }, color: .white)
+            TapIconButton(systemName: "arrow.up.left.and.arrow.down.right", action: onExpand, color: .white)
         }
-        .background(Color(.windowBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(borderColor, lineWidth: (isSelected || hasPrompt) ? 2 : 1)
-        )
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.5))
         .contentShape(Rectangle())
-        .onTapGesture { onSelect() }
-    }
-
-    private var borderColor: Color {
-        if hasPrompt { return .blue }
-        if isSelected { return .blue.opacity(0.7) }
-        if attention != nil { return .orange.opacity(0.5) }
-        return .gray.opacity(0.15)
+        .onTapGesture { isMinimized = false; onRestore?() }
     }
 }

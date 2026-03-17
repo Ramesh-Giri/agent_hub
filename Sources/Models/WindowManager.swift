@@ -49,8 +49,9 @@ final class WindowManager: ObservableObject {
             }
         }
 
-        // Start RC service (hooks + presence marker) early
+        // Ensure RC is enabled and clean up old hook system
         rcService.start()
+        RemoteControlService.cleanupOldHook()
 
         // Start speech + network
         speechService.requestPermission()

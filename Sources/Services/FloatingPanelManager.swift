@@ -19,7 +19,7 @@ final class FloatingPanelManager: NSObject, ObservableObject, NSWindowDelegate {
     private var panel: FloatingPanel?
     private weak var windowManager: WindowManager?
     private var resignTask: Task<Void, Never>?
-    private var normalHeight: CGFloat = 380
+    private var normalHeight: CGFloat = 480
     private let minimizedHeight: CGFloat = 32
     private var isTransitioning = false
 
