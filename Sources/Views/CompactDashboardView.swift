@@ -31,30 +31,48 @@ struct CompactDashboardView: View {
         windowManager.rcService.activePrompt
     }
 
-    /// The frontmost window ID detected via CGWindowList
-    private var frontmostWindowID: CGWindowID? {
+    /// Find the frontmost monitored window by matching CGWindowList titles
+    private var frontmostMonitoredWindow: MonitoredWindow? {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
         let pid = frontApp.processIdentifier
         guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        // Find the topmost window belonging to the frontmost app
+
+        // Get the topmost window title from the frontmost app
         for info in windowList {
             guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
                   ownerPID == pid,
-                  let windowID = info[kCGWindowNumber as String] as? CGWindowID,
-                  let layer = info[kCGWindowLayer as String] as? Int,
-                  layer == 0,
+                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  let title = info[kCGWindowName as String] as? String, !title.isEmpty,
                   let bounds = info[kCGWindowBounds as String] as? [String: Any],
                   let w = bounds["Width"] as? CGFloat, w > 200
             else { continue }
-            return windowID
+
+            // Match by window ID first
+            if let windowID = info[kCGWindowNumber as String] as? CGWindowID,
+               let match = windowManager.monitoredWindows.first(where: { $0.id == windowID }) {
+                return match
+            }
+            // Match by title
+            if let match = windowManager.monitoredWindows.first(where: { $0.windowTitle == title }) {
+                return match
+            }
+            // Partial title match
+            if let match = windowManager.monitoredWindows.first(where: {
+                title.contains($0.windowTitle) || $0.windowTitle.contains(title)
+            }) {
+                return match
+            }
+            break
         }
         return nil
     }
 
-    /// Windows to show in the floating panel — exclude the specific frontmost window
+    /// Windows to show in the floating panel — exclude the frontmost one
     private var visibleWindows: [MonitoredWindow] {
-        let frontID = frontmostWindowID
-        return windowManager.monitoredWindows.filter { $0.id != frontID }
+        guard let front = frontmostMonitoredWindow else {
+            return windowManager.monitoredWindows
+        }
+        return windowManager.monitoredWindows.filter { $0.id != front.id }
     }
 
     var body: some View {
@@ -329,11 +347,7 @@ struct CompactDashboardView: View {
 
     /// Target for commands: the frontmost monitored window (what user is working in)
     private var commandTarget: MonitoredWindow? {
-        if let frontID = frontmostWindowID,
-           let w = windowManager.monitoredWindows.first(where: { $0.id == frontID }) {
-            return w
-        }
-        return selectedWindow
+        frontmostMonitoredWindow ?? selectedWindow
     }
 
     private func sendMessage() {
