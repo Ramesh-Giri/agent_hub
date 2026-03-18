@@ -237,28 +237,15 @@ struct CompactDashboardView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            // Directly activate the target app and raise its window
-            if let app = NSWorkspace.shared.runningApplications.first(where: {
-                $0.localizedName == window.ownerName || $0.bundleIdentifier == window.bundleIdentifier
-            }) {
-                // Raise the specific window first
-                let axApp = AXUIElementCreateApplication(app.processIdentifier)
-                var windowsRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-                   let axWindows = windowsRef as? [AXUIElement] {
-                    for axWindow in axWindows {
-                        var titleRef: CFTypeRef?
-                        AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef)
-                        if let axTitle = titleRef as? String,
-                           axTitle.localizedCaseInsensitiveContains(window.windowTitle.components(separatedBy: " — ").last ?? window.windowTitle) {
-                            AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
-                            AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
-                            break
-                        }
-                    }
-                }
-                // Force activate regardless of current app
-                app.activate(options: .activateIgnoringOtherApps)
+            // Switch to the target app window
+            let project = CommandService.extractProject(from: window)
+            WindowInteractionService.raiseByProjectName(
+                project, windowID: window.id, ownerName: window.ownerName
+            )
+            // Also use osascript as backup — proven to work from any context
+            DispatchQueue.global().async {
+                let script = "tell application \"\(window.ownerName)\" to activate"
+                CommandService.runShell("/usr/bin/osascript", args: ["-e", script])
             }
         }
         .onTapGesture(count: 1) {
