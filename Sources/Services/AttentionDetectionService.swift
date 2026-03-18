@@ -209,7 +209,7 @@ final class AttentionDetectionService: NSObject, ObservableObject, UNUserNotific
         lastNotificationTime[windowID] = Date()
 
         let content = UNMutableNotificationContent()
-        content.title = "AgentHub"
+        content.title = "Canopy"
         content.subtitle = windowName
         content.body = promptText ?? reason.rawValue
         content.sound = .default

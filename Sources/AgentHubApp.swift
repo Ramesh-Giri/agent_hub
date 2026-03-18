@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct AgentHubApp: App {
+struct CanopyApp: App {
     @StateObject private var windowManager = WindowManager()
     @State private var showPermissionSetup = false
     private let floatingPanel = FloatingPanelManager()

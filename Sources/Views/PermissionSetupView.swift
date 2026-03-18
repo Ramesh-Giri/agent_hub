@@ -8,10 +8,6 @@ struct PermissionSetupView: View {
     @State private var hasScreenRecording = false
     @State private var hasAccessibility = false
 
-    private var allGranted: Bool {
-        hasScreenRecording && hasAccessibility
-    }
-
     var body: some View {
         VStack(spacing: 24) {
             VStack(spacing: 8) {
@@ -19,11 +15,11 @@ struct PermissionSetupView: View {
                     .font(.system(size: 48))
                     .foregroundStyle(.blue)
 
-                Text("AgentHub Permissions")
+                Text("Canopy Permissions")
                     .font(.title2)
                     .fontWeight(.bold)
 
-                Text("AgentHub needs two permissions to monitor and interact with your AI agent windows.")
+                Text("Canopy needs two permissions to monitor and interact with your AI agent windows.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -36,7 +32,10 @@ struct PermissionSetupView: View {
                     description: "Live window previews and attention detection",
                     icon: "rectangle.inset.filled.and.person.filled",
                     isGranted: hasScreenRecording,
-                    action: { windowManager.sharingManager.requestPermission() }
+                    action: {
+                        // Open System Settings directly to Screen Recording
+                        CGRequestScreenCaptureAccess()
+                    }
                 )
 
                 permissionRow(
@@ -44,32 +43,32 @@ struct PermissionSetupView: View {
                     description: "Send text and keystrokes to agent windows",
                     icon: "hand.tap",
                     isGranted: hasAccessibility,
-                    action: { windowManager.requestAccessibilityPermission() }
+                    action: {
+                        NSWorkspace.shared.open(
+                            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+                        )
+                    }
                 )
             }
 
-            Text("After granting, you may need to relaunch AgentHub for changes to take effect.")
+            Text("Toggle the permission in System Settings, then come back here.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
 
             HStack {
-                Button("Skip for now") { dismiss() }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Button("Refresh") { checkPermissions() }
-                    .buttonStyle(.bordered)
-
-                Button(allGranted ? "Done" : "Continue Anyway") { dismiss() }
-                    .buttonStyle(.borderedProminent)
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
         }
         .padding(32)
-        .frame(width: 520, height: 420)
-        .task { checkPermissions() }
+        .frame(width: 520, height: 380)
+        .task {
+            while true {
+                checkPermissions()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
     }
 
     private func permissionRow(
@@ -101,7 +100,7 @@ struct PermissionSetupView: View {
                     .foregroundStyle(.green)
                     .font(.title3)
             } else {
-                Button("Grant") { action() }
+                Button("Open Settings") { action() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
             }

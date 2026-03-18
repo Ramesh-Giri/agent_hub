@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>AgentHub</string>
+    <string>Canopy</string>
     <key>CFBundleDisplayName</key>
-    <string>AgentHub</string>
+    <string>Canopy</string>
     <key>CFBundleIdentifier</key>
-    <string>com.techkreator.AgentHub</string>
+    <string>com.techkreator.Canopy</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
@@ -15,12 +15,12 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>AgentHub</string>
+    <string>Canopy</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>AgentHub needs screen capture permission to show live previews of your AI agent windows.</string>
+    <string>Canopy needs screen capture permission to show live previews of your AI agent windows.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>AgentHub needs automation permission to interact with your AI agent windows.</string>
+    <string>Canopy needs automation permission to interact with your AI agent windows.</string>
 </dict>
 </plist>

@@ -1,7 +1,13 @@
 import Foundation
 import AppKit
 
+// Private API: bridges AXUIElement to CGWindowID (used by alt-tab-macos, stable across macOS 10.x–15.x)
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: inout CGWindowID) -> AXError
+
 /// Brings windows to front and sends keystrokes via Accessibility + CGEvent APIs.
+/// Uses multi-signal approach (AXRaise + kAXMainAttribute + activate + kAXFocusedAttribute)
+/// for reliable window targeting among multiple same-PID windows (e.g., multiple VS Code instances).
 final class WindowInteractionService {
 
     var hasAccessibilityPermission: Bool {
@@ -13,33 +19,192 @@ final class WindowInteractionService {
         AXIsProcessTrustedWithOptions(options)
     }
 
-    /// Bring a window's application to the front
+    /// Bring a specific window to front using multi-signal approach.
+    /// Prefers CGWindowID matching via _AXUIElementGetWindow, falls back to title matching.
     func bringToFront(windowID: CGWindowID, ownerName: String) {
         guard let app = findApp(ownerName) else { return }
-        app.activate(options: .activateIgnoringOtherApps)
+        let pid = app.processIdentifier
 
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        // Try to find the AXUIElement by CGWindowID first (most reliable)
+        if let axWindow = Self.findAXWindowByID(windowID, pid: pid) {
+            Self.raiseWithMultiSignal(axWindow: axWindow, app: app)
+            return
+        }
+
+        // Fallback: iterate windows and match by _AXWindowID attribute
+        let axApp = AXUIElementCreateApplication(pid)
         var windowsRef: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
-
-        if result == .success, let windows = windowsRef as? [AXUIElement] {
+        if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let windows = windowsRef as? [AXUIElement] {
             for window in windows {
                 var windowIDRef: CFTypeRef?
                 if AXUIElementCopyAttributeValue(window, "_AXWindowID" as CFString, &windowIDRef) == .success,
                    let wid = windowIDRef as? CGWindowID,
                    wid == windowID {
-                    AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                    Self.raiseWithMultiSignal(axWindow: window, app: app)
                     return
                 }
             }
+            // Last resort: raise first window
             if let firstWindow = windows.first {
-                AXUIElementPerformAction(firstWindow, kAXRaiseAction as CFString)
+                Self.raiseWithMultiSignal(axWindow: firstWindow, app: app)
+                return
             }
+        }
+
+        app.activate()
+    }
+
+    /// Raise a specific window by project name (for command sending targeting).
+    /// Uses CGWindowID matching when available, falls back to title matching.
+    /// Returns the matched AXUIElement for verify-and-retry.
+    @discardableResult
+    static func raiseByProjectName(
+        _ projectName: String,
+        windowID: CGWindowID? = nil,
+        ownerName: String
+    ) -> AXUIElement? {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: {
+            $0.localizedName == ownerName
+        }) else { return nil }
+
+        let pid = app.processIdentifier
+
+        // Prefer CGWindowID match
+        if let wid = windowID, let axWindow = findAXWindowByID(wid, pid: pid) {
+            raiseWithMultiSignal(axWindow: axWindow, app: app)
+            return axWindow
+        }
+
+        // Fall back to title match
+        let axApp = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let axWindows = windowsRef as? [AXUIElement] else {
+            app.activate()
+            return nil
+        }
+
+        for axWindow in axWindows {
+            var titleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef)
+            if let axTitle = titleRef as? String,
+               axTitle.localizedCaseInsensitiveContains(projectName) {
+                raiseWithMultiSignal(axWindow: axWindow, app: app)
+                return axWindow
+            }
+        }
+
+        app.activate()
+        return nil
+    }
+
+    /// Multi-signal raise: AXRaise -> kAXMainAttribute -> activate -> kAXFocusedAttribute
+    /// Order matters: raise BEFORE activate so the app knows which window should be frontmost.
+    private static func raiseWithMultiSignal(axWindow: AXUIElement, app: NSRunningApplication) {
+        // Signal 1: AXRaise (reorders within app's window stack)
+        AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+        // Signal 2: Set as main window
+        AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+        // Signal 3: Activate the app (brings to front of all apps)
+        app.activate()
+        // Signal 4: Set focused (belt-and-suspenders for apps that ignore kAXMain)
+        AXUIElementSetAttributeValue(axWindow, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    }
+
+    /// Find AXUIElement matching a CGWindowID using the private _AXUIElementGetWindow API.
+    /// More reliable than title matching — CGWindowIDs are unique and stable.
+    static func findAXWindowByID(_ targetID: CGWindowID, pid: pid_t) -> AXUIElement? {
+        let axApp = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let axWindows = windowsRef as? [AXUIElement] else { return nil }
+
+        for axWindow in axWindows {
+            var wid: CGWindowID = 0
+            if _AXUIElementGetWindow(axWindow, &wid) == .success, wid == targetID {
+                return axWindow
+            }
+        }
+        return nil
+    }
+
+    /// Verify that the frontmost non-Canopy window contains the expected project name.
+    static func verifyFrontWindow(contains project: String) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        for info in list {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != myPID,
+                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  let t = info[kCGWindowName as String] as? String,
+                  let b = info[kCGWindowBounds as String] as? [String: Any],
+                  let w = b["Width"] as? CGFloat, w > 200 else { continue }
+            return t.localizedCaseInsensitiveContains(project)
+        }
+        return false
+    }
+
+    /// Raise window with verify-and-retry loop (200ms intervals, max attempts).
+    /// Faster than fixed 0.7s wait when it works first try, more reliable when timing is bad.
+    static func raiseAndVerify(
+        projectName: String,
+        windowID: CGWindowID? = nil,
+        ownerName: String,
+        attempts: Int = 3,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let axWindow = raiseByProjectName(projectName, windowID: windowID, ownerName: ownerName)
+
+        retryVerification(
+            projectName: projectName,
+            axWindow: axWindow,
+            ownerName: ownerName,
+            attempts: attempts,
+            completion: completion
+        )
+    }
+
+    private static func retryVerification(
+        projectName: String,
+        axWindow: AXUIElement?,
+        ownerName: String,
+        attempts: Int,
+        completion: @escaping (Bool) -> Void
+    ) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+            if verifyFrontWindow(contains: projectName) {
+                completion(true)
+                return
+            }
+            guard attempts > 1 else {
+                completion(false)
+                return
+            }
+
+            // Retry raise
+            if let axWindow {
+                if let app = NSWorkspace.shared.runningApplications.first(where: {
+                    $0.localizedName == ownerName
+                }) {
+                    raiseWithMultiSignal(axWindow: axWindow, app: app)
+                }
+            } else {
+                _ = raiseByProjectName(projectName, ownerName: ownerName)
+            }
+
+            retryVerification(
+                projectName: projectName,
+                axWindow: axWindow,
+                ownerName: ownerName,
+                attempts: attempts - 1,
+                completion: completion
+            )
         }
     }
 
     /// Send text + Return to a window via CGEvent keystroke injection.
-    /// Brings the window to front first, waits briefly for focus, then types.
     func sendText(_ text: String, toWindowID windowID: CGWindowID, ownerName: String) {
         bringToFront(windowID: windowID, ownerName: ownerName)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {

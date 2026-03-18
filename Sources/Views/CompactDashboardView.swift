@@ -2,7 +2,6 @@ import SwiftUI
 
 struct CompactDashboardView: View {
     @EnvironmentObject var windowManager: WindowManager
-    @StateObject private var terminal = TerminalBridgeService()
     let onExpand: () -> Void
     var onMinimize: (() -> Void)? = nil
     var onRestore: (() -> Void)? = nil
@@ -26,7 +25,7 @@ struct CompactDashboardView: View {
             }
             return !title.isEmpty ? title : window.ownerName
         }
-        if names.isEmpty { return "AgentHub" }
+        if names.isEmpty { return "Canopy" }
         return names.joined(separator: " · ")
     }
 
@@ -35,56 +34,32 @@ struct CompactDashboardView: View {
         windowManager.rcService.activePrompt
     }
 
-    /// Write the frontmost project name to a file so the hook knows which project is visible
-    private func startFrontmostTracking() {
-        Task {
-            while true {
-                try? await Task.sleep(for: .seconds(1))
-                if let front = frontmostMonitoredWindow {
-                    let title = front.windowTitle
-                    let project: String
-                    if let dash = title.range(of: " — ", options: .backwards) {
-                        project = String(title[dash.upperBound...])
-                    } else {
-                        project = title
-                    }
-                    let path = FileManager.default.temporaryDirectory.path + "/agenthub-frontmost.txt"
-                    try? project.write(toFile: path, atomically: true, encoding: .utf8)
-                }
-            }
-        }
-    }
-
-    /// Find the frontmost monitored window by checking ALL on-screen windows in z-order.
-    /// The floating panel is non-activating, so the frontmost app might still be AgentHub.
-    /// Instead, scan the window list in z-order and find the topmost MONITORED window.
+    /// The frontmost monitored window — only hides a window if the user is ACTUALLY looking at it.
+    /// Uses FrontmostTracker (event-driven, ~100ms latency).
+    /// Returns nil when the user is on a non-monitored app (Chrome, Finder, etc.) → all windows show.
     private var frontmostMonitoredWindow: MonitoredWindow? {
-        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        // If Canopy itself is frontmost, this is the floating panel — show all windows
+        if windowManager.frontmostTracker.frontmostProjectName == "__CANOPY_ACTIVE__" {
+            return nil
+        }
 
-        let monitoredIDs = Set(windowManager.monitoredWindows.map(\.id))
-        let myPID = ProcessInfo.processInfo.processIdentifier
+        // Try matching tracker's window ID directly against monitored windows
+        if let trackedID = windowManager.frontmostTracker.frontmostWindowID,
+           let match = windowManager.monitoredWindows.first(where: { $0.id == trackedID }) {
+            return match
+        }
 
-        for info in windowList {
-            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
-                  ownerPID != myPID, // Skip our own windows
-                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
-                  let windowID = info[kCGWindowNumber as String] as? CGWindowID,
-                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
-                  let w = bounds["Width"] as? CGFloat, w > 200
-            else { continue }
-
-            // Direct ID match
-            if monitoredIDs.contains(windowID) {
-                return windowManager.monitoredWindows.first { $0.id == windowID }
-            }
-
-            // Title match (window IDs may have changed since discovery)
-            if let title = info[kCGWindowName as String] as? String, !title.isEmpty {
-                if let match = windowManager.monitoredWindows.first(where: { $0.windowTitle == title }) {
-                    return match
-                }
+        // Try matching by project name from the tracker
+        if let trackedProject = windowManager.frontmostTracker.frontmostProjectName {
+            if let match = windowManager.monitoredWindows.first(where: {
+                $0.windowTitle.localizedCaseInsensitiveContains(trackedProject) ||
+                $0.displayName.localizedCaseInsensitiveContains(trackedProject)
+            }) {
+                return match
             }
         }
+
+        // No match → user is on a non-monitored app (Chrome, etc.) → show ALL windows
         return nil
     }
 
@@ -131,7 +106,6 @@ struct CompactDashboardView: View {
                         let count = visibleWindows.count
 
                         if isWide {
-                            // Horizontal: side by side
                             HStack(spacing: 4) {
                                 ForEach(visibleWindows) { window in
                                     floatingWindowCard(window)
@@ -140,7 +114,6 @@ struct CompactDashboardView: View {
                             }
                             .padding(4)
                         } else if count <= 2 || geo.size.height > geo.size.width * 1.5 {
-                            // Tall: stack vertically
                             VStack(spacing: 4) {
                                 ForEach(visibleWindows) { window in
                                     floatingWindowCard(window)
@@ -149,7 +122,6 @@ struct CompactDashboardView: View {
                             }
                             .padding(4)
                         } else {
-                            // Square-ish: 2-column grid
                             let cols = [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)]
                             LazyVGrid(columns: cols, spacing: 4) {
                                 ForEach(visibleWindows) { window in
@@ -168,11 +140,7 @@ struct CompactDashboardView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .background(Color.black)
-        .onAppear {
-            Task { await windowManager.autoDiscoverAgentWindows() }
-            terminal.autoConnect()
-            startFrontmostTracking()
-        }
+        .onAppear { }
     }
 
     // MARK: - Top Bar
@@ -180,14 +148,13 @@ struct CompactDashboardView: View {
     private var topBar: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(terminal.isConnected ? .green : .gray)
+                .fill(windowManager.rcService.isConnected ? .green : .gray)
                 .frame(width: 8, height: 8)
 
             if let window = selectedWindow, let icon = window.icon {
                 Image(nsImage: icon).resizable().frame(width: 14, height: 14)
             }
 
-            // Only show title when one or zero windows (cards already have titles)
             if visibleWindows.count <= 1 {
                 Text(projectName)
                     .font(.system(size: 12, weight: .semibold))
@@ -228,8 +195,8 @@ struct CompactDashboardView: View {
 
     private func floatingWindowCard(_ window: MonitoredWindow) -> some View {
         let isPromptSource = promptMatchesWindow(hookPrompt, window: window)
+        let isSelected = selectedWindowID == window.id
         return VStack(spacing: 0) {
-            // Title bar
             HStack(spacing: 4) {
                 if let icon = window.icon {
                     Image(nsImage: icon).resizable().frame(width: 12, height: 12)
@@ -247,29 +214,33 @@ struct CompactDashboardView: View {
             .padding(.vertical, 3)
             .background(Color(white: 0.12))
 
-            // Screenshot — natural aspect ratio
-            if let screenshot = windowManager.screenshots[window.id] {
-                Image(nsImage: screenshot)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-            } else {
+            ZStack {
                 Color(white: 0.06)
-                    .aspectRatio(16/10, contentMode: .fit)
-                    .overlay {
-                        Image(systemName: "terminal").foregroundStyle(.gray.opacity(0.3))
-                    }
+                if let screenshot = windowManager.screenshots[window.id] {
+                    Image(nsImage: screenshot)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    Image(systemName: "terminal").foregroundStyle(.gray.opacity(0.3))
+                }
             }
+            .aspectRatio(16/10, contentMode: .fit)
+            .clipped()
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isPromptSource ? .orange : .white.opacity(0.08), lineWidth: isPromptSource ? 2 : 1)
+                .stroke(
+                    isPromptSource ? .orange : (isSelected ? .blue.opacity(0.6) : .white.opacity(0.08)),
+                    lineWidth: isPromptSource ? 2 : (isSelected ? 1.5 : 1)
+                )
         )
         .contentShape(Rectangle())
-        .onTapGesture {
-            selectedWindowID = window.id
+        .onTapGesture(count: 2) {
             windowManager.bringWindowToFront(window)
+        }
+        .onTapGesture(count: 1) {
+            selectedWindowID = window.id
         }
     }
 
@@ -280,11 +251,10 @@ struct CompactDashboardView: View {
                window.displayName.localizedCaseInsensitiveContains(project)
     }
 
-    // MARK: - Permission Prompt Banner (top, full width)
+    // MARK: - Permission Prompt Banner
 
     private func promptBanner(_ prompt: RemoteControlService.PromptInfo) -> some View {
         VStack(spacing: 8) {
-            // Show which project triggered the prompt
             if let cwd = prompt.cwd {
                 let source = URL(fileURLWithPath: cwd).lastPathComponent
                 HStack(spacing: 4) {
@@ -325,84 +295,31 @@ struct CompactDashboardView: View {
         .overlay(Rectangle().frame(height: 1).foregroundStyle(.orange.opacity(0.3)), alignment: .bottom)
     }
 
-    private func buttonColor(for label: String) -> Color {
-        let l = label.lowercased()
-        if l.contains("yes") || l.contains("allow") || l.contains("accept") || l.contains("1.") { return .green.opacity(0.7) }
-        if l.contains("no") || l.contains("deny") || l.contains("reject") || l.contains("3.") { return .red.opacity(0.7) }
-        return .blue.opacity(0.6)
-    }
-
-    /// Send a keystroke to a specific window — brings it to front, types, then restores
-    private func sendKeystrokeToWindow(_ text: String, window: MonitoredWindow) {
-        // Bring the TARGET window to front
-        windowManager.bringWindowToFront(window)
-
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) {
-            let pid = Self.findPID(for: window)
-            let utf16 = Array(text.utf16)
-            for i in stride(from: 0, to: utf16.count, by: 20) {
-                let end = min(i + 20, utf16.count)
-                var chunk = Array(utf16[i..<end])
-                let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: true)
-                down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
-                if let pid { down?.postToPid(pid) } else { down?.post(tap: .cghidEventTap) }
-                let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: false)
-                if let pid { up?.postToPid(pid) } else { up?.post(tap: .cghidEventTap) }
-            }
-        }
-    }
-
-    /// Send a keystroke to the selected window (for action buttons)
-    private func sendKeystroke(_ text: String) {
-        guard let window = selectedWindow else { return }
-        let pid = Self.findPID(for: window)
-
-        windowManager.bringWindowToFront(window)
-
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-            let utf16 = Array(text.utf16)
-            for i in stride(from: 0, to: utf16.count, by: 20) {
-                let end = min(i + 20, utf16.count)
-                var chunk = Array(utf16[i..<end])
-                let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: true)
-                down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
-                if let pid { down?.postToPid(pid) } else { down?.post(tap: .cghidEventTap) }
-                let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: false)
-                if let pid { up?.postToPid(pid) } else { up?.post(tap: .cghidEventTap) }
-            }
-
-            // Clear the attention after responding
-            Task { @MainActor [weak windowManager] in
-                if let wid = window.id as CGWindowID? {
-                    windowManager?.attentionService.clearAttention(windowID: wid)
-                }
-            }
-        }
-    }
-
     // MARK: - Input Bar
 
     private var inputBar: some View {
         HStack(spacing: 8) {
             PanelTextField(
-                placeholder: "Send a message...",
+                placeholder: "Message...",
                 text: $messageText,
                 onSubmit: { sendMessage() }
             )
-            .frame(height: 34)
+            .frame(maxWidth: .infinity)
 
-            PanelSendButton(title: "  Send  ") {
-                sendMessage()
-            }
-            .frame(height: 30)
+            TapButton(
+                label: "Send",
+                action: { sendMessage() },
+                color: .white, bgColor: .blue,
+                font: .system(size: 13, weight: .semibold)
+            )
+            .frame(width: 60, height: 28)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .background(Color(white: 0.1))
     }
 
-    /// Target for commands: the window shown in the floating panel (background one)
-    /// The user is already typing in the frontmost window — floating panel targets the OTHER window
+    /// Target for commands: the selected visible window, or the first visible background window
     private var commandTarget: MonitoredWindow? {
         if let id = selectedWindowID, let w = visibleWindows.first(where: { $0.id == id }) { return w }
         return visibleWindows.first ?? windowManager.monitoredWindows.first
@@ -410,10 +327,18 @@ struct CompactDashboardView: View {
 
     private func sendMessage() {
         let text = messageText.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return }
-        guard let window = commandTarget else { return }
+        guard !text.isEmpty else {
+            NSLog("[Canopy] Empty text, not sending")
+            return
+        }
+        guard let window = commandTarget else {
+            NSLog("[Canopy] No command target — no visible or monitored windows")
+            return
+        }
+        NSLog("[Canopy] Sending '%@' to: %@ — %@", text, window.ownerName, window.windowTitle)
+        NSLog("[Canopy] AX trusted: %d, window ID: %d", AXIsProcessTrusted() ? 1 : 0, window.id)
         messageText = ""
-        NotificationCenter.default.post(name: .init("AgentHubClearInput"), object: nil)
+        NotificationCenter.default.post(name: .init("CanopyClearInput"), object: nil)
 
         let title = window.windowTitle
         let project: String
@@ -431,21 +356,18 @@ struct CompactDashboardView: View {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
-        // 3. Raise the correct window (AXRaise BEFORE activate)
-        Self.raiseWindowByProjectName(project, ownerName: window.ownerName)
-
-        // 4. Wait, verify, paste, enter
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.7) {
-            // Verify correct window is in front
-            if !Self.verifyFrontWindow(contains: project) {
-                // Retry
-                DispatchQueue.main.sync {
-                    Self.raiseWindowByProjectName(project, ownerName: window.ownerName)
-                }
-                Thread.sleep(forTimeInterval: 0.5)
-            }
-
-            // Cmd+V paste (single operation — fast and reliable)
+        // 3. Raise with verify-and-retry
+        let windowID = window.id
+        let ownerName = window.ownerName
+        NSLog("[Canopy] Raising window: project=%@, windowID=%d, owner=%@", project, windowID, ownerName)
+        WindowInteractionService.raiseAndVerify(
+            projectName: project,
+            windowID: windowID,
+            ownerName: ownerName,
+            attempts: 3
+        ) { success in
+            NSLog("[Canopy] Raise result: %d, now pasting", success ? 1 : 0)
+            // 4. Paste + Enter
             let src = CGEventSource(stateID: .hidSystemState)
             let vDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
             vDown?.flags = .maskCommand
@@ -454,11 +376,10 @@ struct CompactDashboardView: View {
 
             Thread.sleep(forTimeInterval: 0.15)
 
-            // Enter
             CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: true)?.post(tap: .cghidEventTap)
             CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: false)?.post(tap: .cghidEventTap)
 
-            // Restore clipboard
+            // 5. Restore clipboard
             Thread.sleep(forTimeInterval: 0.3)
             DispatchQueue.main.async {
                 pasteboard.clearContents()
@@ -467,74 +388,20 @@ struct CompactDashboardView: View {
         }
     }
 
-    /// Check if the topmost non-AgentHub window contains the project name
-    private static func verifyFrontWindow(contains project: String) -> Bool {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
-        let myPID = ProcessInfo.processInfo.processIdentifier
-        for info in list {
-            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != myPID,
-                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
-                  let t = info[kCGWindowName as String] as? String,
-                  let b = info[kCGWindowBounds as String] as? [String: Any],
-                  let w = b["Width"] as? CGFloat, w > 200 else { continue }
-            return t.localizedCaseInsensitiveContains(project)
-        }
-        return false
-    }
-
-    /// Raise a specific window: AXRaise first, THEN activate app
-    private static func raiseWindowByProjectName(_ projectName: String, ownerName: String) {
-        guard let app = NSWorkspace.shared.runningApplications.first(where: {
-            $0.localizedName == ownerName
-        }) else { return }
-
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let axWindows = windowsRef as? [AXUIElement] else {
-            app.activate()
-            return
-        }
-
-        for axWindow in axWindows {
-            var titleRef: CFTypeRef?
-            AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef)
-            if let axTitle = titleRef as? String,
-               axTitle.localizedCaseInsensitiveContains(projectName) {
-                // Raise FIRST, then activate — ensures this specific window comes to front
-                AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
-                app.activate()
-                return
-            }
-        }
-        app.activate()
-    }
-
-    private static func findPID(for window: MonitoredWindow) -> pid_t? {
-        guard let apps = NSWorkspace.shared.runningApplications as [NSRunningApplication]? else { return nil }
-        let app = apps.first {
-            $0.bundleIdentifier == window.bundleIdentifier ||
-            $0.localizedName == window.ownerName
-        }
-        return app?.processIdentifier
-    }
-
-    // MARK: - Window Tabs
-
     // MARK: - Minimized Pill
 
     private var minimizedPill: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(terminal.isConnected ? .green : .gray)
+                .fill(windowManager.rcService.isConnected ? .green : .gray)
                 .frame(width: 6, height: 6)
 
             let count = windowManager.monitoredWindows.count
-            Text(count > 0 ? "\(count) window\(count == 1 ? "" : "s")" : "AgentHub")
+            Text(count > 0 ? "\(count) window\(count == 1 ? "" : "s")" : "Canopy")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.white.opacity(0.9))
 
-            if terminal.activePrompt != nil {
+            if hookPrompt != nil {
                 Text("Action needed")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.white)

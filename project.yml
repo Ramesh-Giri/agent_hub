@@ -1,4 +1,4 @@
-name: AgentHub
+name: Canopy
 options:
   bundleIdPrefix: com.techkreator
   deploymentTarget:
@@ -13,15 +13,15 @@ settings:
     ENABLE_HARDENED_RUNTIME: YES
 
 targets:
-  AgentHub:
+  Canopy:
     type: application
     platform: macOS
     sources:
       - Sources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.techkreator.AgentHub
-        PRODUCT_NAME: AgentHub
+        PRODUCT_BUNDLE_IDENTIFIER: com.techkreator.Canopy
+        PRODUCT_NAME: Canopy
         INFOPLIST_FILE: Info.plist
         CODE_SIGN_ENTITLEMENTS: AgentHub.entitlements
         MARKETING_VERSION: "1.0.0"

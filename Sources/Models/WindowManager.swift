@@ -19,9 +19,8 @@ final class WindowManager: ObservableObject {
     // Permission prompt handling
     @Published var rcService = RemoteControlService()
 
-    // Speech + Remote
-    @Published var speechService = SpeechService()
-    let networkServer = NetworkServer()
+    // Event-driven frontmost window tracking
+    @Published var frontmostTracker = FrontmostTracker()
 
     let sharingManager = ContentSharingManager()
     private let discoveryService = WindowDiscoveryService()
@@ -41,10 +40,7 @@ final class WindowManager: ObservableObject {
         attentionService.onNotificationAction = { [weak self] windowID, action in
             guard let self, let window = self.monitoredWindows.first(where: { $0.id == windowID }) else { return }
             switch action {
-            case .bringToFront:
-                self.bringWindowToFront(window)
-            case .sendYes, .sendNo, .sendText:
-                // Keystroke injection not supported — bring window to front instead
+            case .bringToFront, .sendYes, .sendNo, .sendText:
                 self.bringWindowToFront(window)
             }
         }
@@ -52,17 +48,8 @@ final class WindowManager: ObservableObject {
         // Start RC service (hook installation + prompt watching)
         rcService.start()
 
-        // Start speech + network
-        speechService.requestPermission()
-        networkServer.start()
-
-        // Auto-discover agent windows
-        Task { await autoDiscoverAgentWindows() }
-        networkServer.onCommand = { [weak self] command in
-            self?.handleRemoteCommand(command)
-        }
-
-        startWindowBroadcast()
+        // Start event-driven frontmost tracking (replaces 1s polling)
+        frontmostTracker.start()
     }
 
     func addWindow(_ window: MonitoredWindow) {
@@ -70,7 +57,13 @@ final class WindowManager: ObservableObject {
         guard !monitoredWindows.contains(where: {
             $0.ownerName == window.ownerName && $0.windowTitle == window.windowTitle
         }) else { return }
+        let wasEmpty = monitoredWindows.isEmpty
         monitoredWindows.append(window)
+
+        // Activate hook interception when first window is added
+        if wasEmpty {
+            rcService.activateHook()
+        }
 
         if titleMonitorTask == nil {
             startTitleMonitoring()
@@ -84,7 +77,10 @@ final class WindowManager: ObservableObject {
         screenshots.removeValue(forKey: window.id)
         windowContext.removeValue(forKey: window.id)
         attentionService.cleanupWindow(window.id)
-        if monitoredWindows.isEmpty { stopTitleMonitoring() }
+        if monitoredWindows.isEmpty {
+            stopTitleMonitoring()
+            rcService.deactivateHook()
+        }
     }
 
     func removeWindow(byID id: CGWindowID) {
@@ -92,7 +88,10 @@ final class WindowManager: ObservableObject {
         screenshots.removeValue(forKey: id)
         windowContext.removeValue(forKey: id)
         attentionService.cleanupWindow(id)
-        if monitoredWindows.isEmpty { stopTitleMonitoring() }
+        if monitoredWindows.isEmpty {
+            stopTitleMonitoring()
+            rcService.deactivateHook()
+        }
     }
 
     func discoverWindows() async -> [DiscoveredWindow] {
@@ -195,66 +194,8 @@ final class WindowManager: ObservableObject {
         for window in monitoredWindows { await fetchContextForWindow(window) }
     }
 
-    // MARK: - iOS Broadcast
-
-    private var broadcastTask: Task<Void, Never>?
-
-    private func startWindowBroadcast() {
-        broadcastTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let infos = self.monitoredWindows.map { window -> WindowInfo in
-                    var info = WindowInfo(
-                        id: window.id, ownerName: window.ownerName,
-                        windowTitle: window.windowTitle, bundleIdentifier: window.bundleIdentifier
-                    )
-                    if let screenshot = self.screenshots[window.id] {
-                        info.screenshotBase64 = self.encodeScreenshotAsBase64(screenshot)
-                    }
-                    info.attentionReason = self.attentionService.attentionWindows[window.id]?.reason.rawValue
-                    return info
-                }
-                self.networkServer.broadcastWindowList(infos)
-                try? await Task.sleep(for: .seconds(3))
-            }
-        }
-    }
-
-    private func encodeScreenshotAsBase64(_ image: NSImage, maxWidth: CGFloat = 480) -> String? {
-        let scale = min(1.0, maxWidth / image.size.width)
-        let newSize = NSSize(width: image.size.width * scale, height: image.size.height * scale)
-
-        guard let bitmapRep = NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: Int(newSize.width), pixelsHigh: Int(newSize.height),
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
-        ) else { return nil }
-
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
-        image.draw(in: NSRect(origin: .zero, size: newSize))
-        NSGraphicsContext.restoreGraphicsState()
-
-        guard let jpegData = bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: 0.5])
-        else { return nil }
-        return jpegData.base64EncodedString()
-    }
-
-    private func handleRemoteCommand(_ command: RemoteCommand) {
-        guard let windowId = command.windowId,
-              let window = monitoredWindows.first(where: { $0.id == windowId }) else { return }
-
-        switch command.type {
-        case .sendText, .sendReturn:
-            bringWindowToFront(window)
-        case .bringToFront:
-            bringWindowToFront(window)
-        }
-    }
-
     deinit {
         titleMonitorTask?.cancel()
         contextTask?.cancel()
-        broadcastTask?.cancel()
     }
 }

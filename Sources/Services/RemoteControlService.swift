@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// Watches for Claude Code permission prompts via a lightweight hook.
 /// The hook writes prompt info to /tmp, this service reads it and publishes to UI.
@@ -20,15 +21,12 @@ final class RemoteControlService: ObservableObject {
     }
 
     private static let promptDir = FileManager.default.temporaryDirectory.path
-    private static let promptPrefix = "agenthub-prompt-"
+    private static let promptPrefix = "canopy-prompt-"
 
     func start() {
         Self.ensureRCEnabled()
         Self.installHook()
-        // Write presence marker
-        FileManager.default.createFile(
-            atPath: Self.promptDir + "/agenthub-active", contents: nil
-        )
+        // Don't write presence marker yet — only when user adds windows
         isConnected = true
         startWatching()
     }
@@ -37,13 +35,25 @@ final class RemoteControlService: ObservableObject {
         watchTask?.cancel()
         watchTask = nil
         isConnected = false
-        try? FileManager.default.removeItem(atPath: Self.promptDir + "/agenthub-active")
+        deactivateHook()
+    }
+
+    /// Write presence marker so the hook starts intercepting background prompts
+    func activateHook() {
+        FileManager.default.createFile(
+            atPath: Self.promptDir + "/canopy-active", contents: nil
+        )
+    }
+
+    /// Remove presence marker so the hook passes through everything
+    func deactivateHook() {
+        try? FileManager.default.removeItem(atPath: Self.promptDir + "/canopy-active")
     }
 
     /// Respond to the current prompt — writes response file that the blocking hook reads
     func respondToPrompt(allow: Bool) {
         guard let prompt = activePrompt else { return }
-        let responsePath = Self.promptDir + "/agenthub-response-" + prompt.id + ".json"
+        let responsePath = Self.promptDir + "/canopy-response-" + prompt.id + ".json"
         let response: [String: Any] = ["allow": allow]
         if let data = try? JSONSerialization.data(withJSONObject: response) {
             try? data.write(to: URL(fileURLWithPath: responsePath))
@@ -65,6 +75,10 @@ final class RemoteControlService: ObservableObject {
     private func scanForPrompts() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: Self.promptDir) else { return }
+
+        // If Canopy main window is active, auto-allow any prompts that slip through
+        // (the hook should have passed them through, but stale files may exist)
+        let canopyIsActive = NSApp.isActive
 
         for file in files where file.hasPrefix(Self.promptPrefix) && file.hasSuffix(".json") {
             let uuid = String(file.dropFirst(Self.promptPrefix.count).dropLast(".json".count))
@@ -136,11 +150,11 @@ final class RemoteControlService: ObservableObject {
         return true
     }
 
-    /// Install a minimal PreToolUse hook that writes prompt files for AgentHub
+    /// Install a minimal PreToolUse hook that writes prompt files for Canopy
     nonisolated static func installHook() {
         let fm = FileManager.default
         let hooksDir = NSHomeDirectory() + "/.claude/hooks"
-        let scriptPath = hooksDir + "/agenthub-prompt.js"
+        let scriptPath = hooksDir + "/canopy-prompt.js"
 
         if !fm.fileExists(atPath: hooksDir) {
             try? fm.createDirectory(atPath: hooksDir, withIntermediateDirectories: true)
@@ -161,7 +175,7 @@ final class RemoteControlService: ObservableObject {
         var preToolHooks = hooks["PreToolUse"] as? [[String: Any]] ?? []
         let alreadyInstalled = preToolHooks.contains { entry in
             (entry["hooks"] as? [[String: Any]])?.contains {
-                ($0["command"] as? String)?.contains("agenthub-prompt") == true
+                ($0["command"] as? String)?.contains("canopy-prompt") == true
             } ?? false
         }
 
@@ -181,17 +195,18 @@ final class RemoteControlService: ObservableObject {
         }
     }
 
-    /// Blocking hook: waits for AgentHub to respond with allow/deny
+    /// Blocking hook: waits for Canopy to respond with allow/deny
     /// Outputs the decision so Claude Code acts on it — no terminal dialog needed
     private nonisolated static let hookScript = """
     #!/usr/bin/env node
     const fs = require('fs');
     const crypto = require('crypto');
+    const path = require('path');
     const os = require('os');
     const tmpDir = os.tmpdir();
 
     try {
-      if (!fs.existsSync(tmpDir + '/agenthub-active')) process.exit(0);
+      if (!fs.existsSync(tmpDir + '/canopy-active')) process.exit(0);
 
       const input = fs.readFileSync('/dev/stdin', 'utf8');
       if (!input.trim()) process.exit(0);
@@ -205,28 +220,77 @@ final class RemoteControlService: ObservableObject {
       const tool = data.tool_name || '';
       if (!['Bash', 'Write', 'Edit'].includes(tool)) process.exit(0);
 
+      // If Canopy app is in the foreground, don't block — user can see all prompts in Canopy's UI
       // If this project is the one user is looking at, don't block — let Claude Code show its own dialog
       try {
-        const frontProject = fs.readFileSync(tmpDir + '/agenthub-frontmost.txt', 'utf8').trim();
-        const cwd = process.cwd();
-        const projectName = cwd.split('/').pop();
-        if (frontProject && projectName && frontProject === projectName) process.exit(0);
+        const frontProject = fs.readFileSync(tmpDir + '/canopy-frontmost.txt', 'utf8').trim();
+        // Canopy main window is active — pass through everything
+        if (frontProject === '__CANOPY_ACTIVE__') process.exit(0);
+        const fp = frontProject.toLowerCase();
+        const cwd = process.cwd().toLowerCase();
+        if (fp && cwd.includes(fp)) process.exit(0);
+        const segments = cwd.split('/');
+        for (const seg of segments) {
+          if (seg && fp && seg === fp) process.exit(0);
+        }
       } catch {}
 
-      // Check if already allowed by settings (skip if so)
+      // Check if already allowed by settings
       const home = process.env.HOME;
       const toolInput = data.tool_input || {};
       const cmd = toolInput.command || '';
       const filePath = toolInput.file_path || '';
       let allowRules = [];
+
+      // Load global settings
       try { allowRules = JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8'))?.permissions?.allow || []; } catch {}
+
+      // Load project-local settings
       try {
         const local = JSON.parse(fs.readFileSync(process.cwd() + '/.claude/settings.local.json', 'utf8'));
         allowRules = [...allowRules, ...(local?.permissions?.allow || [])];
       } catch {}
+
+      // Also check user-level project settings (~/.claude/projects/<encoded-path>/settings.local.json)
+      try {
+        const encodedPath = process.cwd().replace(/\\//g, '-');
+        const userProjectSettings = home + '/.claude/projects/' + encodedPath + '/settings.local.json';
+        const ups = JSON.parse(fs.readFileSync(userProjectSettings, 'utf8'));
+        allowRules = [...allowRules, ...(ups?.permissions?.allow || [])];
+      } catch {}
+
+      // Check allow rules — supports both "Tool" and "Tool(pattern)" formats
       for (const r of allowRules) {
         if (typeof r !== 'string') continue;
+
+        // Exact tool match: "Edit" allows all edits
         if (r === tool) process.exit(0);
+
+        // Claude Code format: "Tool(pattern)" e.g. "Bash(git *)", "Edit(/path/*)"
+        const m = r.match(/^(\\w+)\\((.+)\\)$/);
+        if (m && m[1] === tool) {
+          const pattern = m[2];
+
+          // Direct substring match
+          if (cmd && cmd.includes(pattern)) process.exit(0);
+          if (filePath && filePath.includes(pattern)) process.exit(0);
+
+          // Glob-style match: convert * to .* for regex
+          if (pattern.includes('*')) {
+            try {
+              const escaped = pattern.replace(/[.+^${}()|[\\]\\\\]/g, '\\\\$&').replace(/\\*/g, '.*');
+              const re = new RegExp('^' + escaped + '$');
+              if (cmd && re.test(cmd)) process.exit(0);
+              if (filePath && re.test(filePath)) process.exit(0);
+            } catch {}
+          }
+
+          // Path prefix match: "Edit(/Users/x/project)" matches files under that dir
+          if (filePath && filePath.startsWith(pattern)) process.exit(0);
+          if (cmd && cmd.startsWith(pattern)) process.exit(0);
+        }
+
+        // Legacy format: "Tool:pattern"
         if (r.startsWith(tool + ':')) {
           const p = r.slice(tool.length + 1);
           if (cmd && cmd.includes(p)) process.exit(0);
@@ -234,10 +298,10 @@ final class RemoteControlService: ObservableObject {
         }
       }
 
-      // This tool needs permission — block and wait for AgentHub
+      // This tool needs permission — block and wait for Canopy
       const uuid = crypto.randomUUID();
-      const promptFile = tmpDir + '/agenthub-prompt-' + uuid + '.json';
-      const responseFile = tmpDir + '/agenthub-response-' + uuid + '.json';
+      const promptFile = tmpDir + '/canopy-prompt-' + uuid + '.json';
+      const responseFile = tmpDir + '/canopy-response-' + uuid + '.json';
       data._cwd = process.cwd();
       data._uuid = uuid;
       fs.writeFileSync(promptFile, JSON.stringify(data, null, 2));
@@ -254,7 +318,7 @@ final class RemoteControlService: ObservableObject {
               hookSpecificOutput: {
                 hookEventName: 'PreToolUse',
                 permissionDecision: resp.allow ? 'allow' : 'deny',
-                permissionDecisionReason: resp.allow ? 'Allowed from AgentHub' : 'Denied from AgentHub'
+                permissionDecisionReason: resp.allow ? 'Allowed from Canopy' : 'Denied from Canopy'
               }
             }));
             process.exit(0);

@@ -24,7 +24,7 @@ struct SettingsView: View {
                 Toggle("Enable attention notifications", isOn: $windowManager.attentionService.notificationsEnabled)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("AgentHub detects when windows need your attention:")
+                    Text("Canopy detects when windows need your attention:")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("  - Prompt waiting (y/n, Continue?, etc.)")
@@ -36,41 +36,6 @@ struct SettingsView: View {
                     Text("  - Window title changes indicating errors")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
-                }
-            }
-
-            Section("iOS Remote") {
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text("Network Server")
-                            .font(.body)
-                        Text("Bonjour service for iOS companion app")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if windowManager.networkServer.isRunning {
-                        HStack(spacing: 4) {
-                            Circle().fill(.green).frame(width: 8, height: 8)
-                            Text("Running")
-                                .foregroundStyle(.green)
-                                .font(.caption)
-                        }
-                    } else {
-                        HStack(spacing: 4) {
-                            Circle().fill(.red).frame(width: 8, height: 8)
-                            Text("Stopped")
-                                .foregroundStyle(.red)
-                                .font(.caption)
-                        }
-                    }
-                }
-
-                HStack {
-                    Text("Connected clients")
-                    Spacer()
-                    Text("\(windowManager.networkServer.connectedClients)")
-                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -150,34 +115,11 @@ struct SettingsView: View {
                         }
                     }
                 }
-
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text("Microphone")
-                            .font(.body)
-                        Text("Required for voice input to agents")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if windowManager.speechService.isAvailable {
-                        HStack(spacing: 4) {
-                            Circle().fill(.green).frame(width: 8, height: 8)
-                            Text("Granted")
-                                .foregroundStyle(.green)
-                                .font(.caption)
-                        }
-                    } else {
-                        Button("Grant Permission") {
-                            windowManager.speechService.requestPermission()
-                        }
-                    }
-                }
             }
 
             Section("About") {
                 HStack {
-                    Text("AgentHub")
+                    Text("Canopy")
                     Spacer()
                     Text("v1.0.0")
                         .foregroundStyle(.secondary)
@@ -185,6 +127,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 550, height: 550)
+        .frame(width: 550, height: 500)
     }
 }

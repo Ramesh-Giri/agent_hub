@@ -2,13 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "AgentHub",
+    name: "Canopy",
     platforms: [
         .macOS(.v14)
     ],
     targets: [
         .executableTarget(
-            name: "AgentHub",
+            name: "Canopy",
             path: "Sources",
             resources: [
                 .process("Resources")

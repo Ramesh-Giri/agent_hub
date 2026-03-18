@@ -7,7 +7,7 @@ final class WindowDiscoveryService {
 
     /// System/utility apps to always exclude
     private static let excludedOwnerNames: Set<String> = [
-        "AgentHub",
+        "Canopy",
         "WindowManager",
         "AutoFill",
         "loginwindow",

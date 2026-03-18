@@ -11,23 +11,22 @@ struct PanelTextField: NSViewRepresentable {
         let field = NSTextField()
         field.placeholderString = placeholder
         field.stringValue = text
-        field.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        field.font = .systemFont(ofSize: 14)
         field.textColor = .white
-        field.backgroundColor = NSColor.white.withAlphaComponent(0.08)
+        field.backgroundColor = NSColor.white.withAlphaComponent(0.1)
         field.drawsBackground = true
-        field.isBezeled = false
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
         field.focusRingType = .none
         field.cell?.wraps = false
         field.cell?.isScrollable = true
-        field.wantsLayer = true
-        field.layer?.cornerRadius = 8
         field.delegate = context.coordinator
         context.coordinator.textField = field
-        // Listen for clear notifications
+
         NotificationCenter.default.addObserver(
             context.coordinator,
             selector: #selector(Coordinator.handleClear),
-            name: .init("AgentHubClearInput"),
+            name: .init("CanopyClearInput"),
             object: nil
         )
         return field
@@ -35,7 +34,6 @@ struct PanelTextField: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSTextField, context: Context) {
         context.coordinator.onSubmit = onSubmit
-        // Only sync text if field isn't currently being edited
         if nsView.currentEditor() == nil && nsView.stringValue != text {
             nsView.stringValue = text
         }
@@ -63,6 +61,7 @@ struct PanelTextField: NSViewRepresentable {
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                NSLog("[Canopy] Enter key pressed, calling onSubmit")
                 onSubmit()
                 clearField()
                 return true
@@ -81,7 +80,7 @@ struct PanelTextField: NSViewRepresentable {
     }
 }
 
-/// Native NSButton that works in NSPanel
+/// Native NSButton that works in NSPanel — compact send button
 struct PanelSendButton: NSViewRepresentable {
     let title: String
     let action: () -> Void
@@ -94,7 +93,9 @@ struct PanelSendButton: NSViewRepresentable {
         button.layer?.backgroundColor = NSColor.systemBlue.cgColor
         button.layer?.cornerRadius = 6
         button.isBordered = false
-        button.font = .systemFont(ofSize: 12, weight: .bold)
+        button.font = .systemFont(ofSize: 12, weight: .semibold)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
         return button
     }
 
@@ -117,6 +118,7 @@ struct PanelSendButton: NSViewRepresentable {
 class SendButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) {
+        NSLog("[Canopy] SendButton clicked")
         window?.makeKey()
         super.mouseDown(with: event)
     }

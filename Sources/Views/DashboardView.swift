@@ -11,7 +11,7 @@ struct DashboardView: View {
     }
 
     private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 12), count: windowManager.gridColumns)
+        Array(repeating: GridItem(.flexible(), spacing: 8), count: windowManager.gridColumns)
     }
 
     private var hookPrompt: RemoteControlService.PromptInfo? {
@@ -26,112 +26,50 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color(.windowBackgroundColor)
-                .ignoresSafeArea()
+        VStack(spacing: 0) {
+            // Permission prompt banner — only show when windows are being monitored
+            if !windowManager.monitoredWindows.isEmpty, let prompt = hookPrompt {
+                promptBanner(prompt)
+            }
 
-            VStack(spacing: 0) {
-                // Permission prompt banner
-                if let prompt = hookPrompt {
-                    promptBanner(prompt)
-                }
-
-                if windowManager.monitoredWindows.isEmpty {
-                    emptyState
-                        .frame(maxHeight: .infinity)
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: 12) {
-                            ForEach(windowManager.monitoredWindows) { window in
-                                let isPromptSource = promptMatchesWindow(hookPrompt, window: window)
-                                WindowThumbnailView(
-                                    window: window,
-                                    screenshot: windowManager.screenshots[window.id],
-                                    onSelect: {
-                                        selectedWindow = window
-                                        windowManager.bringWindowToFront(window)
-                                    },
-                                    onRemove: { windowManager.removeWindow(window) }
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .stroke(isPromptSource ? .orange : (selectedWindow?.id == window.id ? .blue : .clear), lineWidth: isPromptSource ? 3 : 2)
-                                )
-                                .shadow(color: isPromptSource ? .orange.opacity(0.4) : .clear, radius: 8)
-                            }
+            if windowManager.monitoredWindows.isEmpty {
+                emptyState
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 8) {
+                        ForEach(windowManager.monitoredWindows) { window in
+                            let isPromptSource = promptMatchesWindow(hookPrompt, window: window)
+                            WindowThumbnailView(
+                                window: window,
+                                screenshot: windowManager.screenshots[window.id],
+                                onSelect: {
+                                    selectedWindow = window
+                                    windowManager.bringWindowToFront(window)
+                                },
+                                onRemove: { windowManager.removeWindow(window) }
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(isPromptSource ? .orange : (selectedWindow?.id == window.id ? .blue : .clear), lineWidth: isPromptSource ? 3 : 2)
+                            )
+                            .shadow(color: isPromptSource ? .orange.opacity(0.4) : .clear, radius: 8)
                         }
-                        .padding(16)
                     }
+                    .padding(8)
                 }
 
                 // Command input bar
-                if !windowManager.monitoredWindows.isEmpty {
-                    commandBar
-                }
+                commandBar
             }
         }
+        .background(Color(.windowBackgroundColor))
         .toolbar {
-            ToolbarItemGroup(placement: .automatic) {
-                if windowManager.networkServer.connectedClients > 0 {
-                    HStack(spacing: 3) {
-                        Image(systemName: "iphone.radiowaves.left.and.right")
-                            .foregroundStyle(.green)
-                        Text("\(windowManager.networkServer.connectedClients)")
-                            .font(.caption2)
-                            .foregroundStyle(.green)
-                    }
-                    .help("\(windowManager.networkServer.connectedClients) iOS device(s) connected")
-                } else if windowManager.networkServer.isRunning {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                        .foregroundStyle(.secondary)
-                        .help("Waiting for iOS companion app")
-                }
-
-                if windowManager.isClaudeMemAvailable {
-                    HStack(spacing: 3) {
-                        Image(systemName: "brain.head.profile")
-                            .foregroundStyle(.purple)
-                        Text("mem")
-                            .font(.caption2)
-                            .foregroundStyle(.purple)
-                    }
-                    .help("Claude-mem connected at localhost:37777")
-                }
-
-                if attentionCount > 0 {
-                    Button {
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "bell.badge.fill")
-                                .foregroundStyle(.orange)
-                            Text("\(attentionCount)")
-                                .font(.caption)
-                                .fontWeight(.bold)
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                    .help("\(attentionCount) window(s) need attention")
-                }
-            }
-
-            ToolbarItemGroup(placement: .primaryAction) {
-                gridColumnControl
-
-                Divider()
-
-                Button {
-                    windowManager.attentionService.notificationsEnabled.toggle()
-                } label: {
-                    Image(systemName: windowManager.attentionService.notificationsEnabled
-                          ? "bell.fill" : "bell.slash")
-                }
-                .help(windowManager.attentionService.notificationsEnabled
-                      ? "Notifications on" : "Notifications off")
-
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingWindowPicker = true
                 } label: {
-                    Label("Add Windows", systemImage: "plus.rectangle.on.rectangle")
+                    Image(systemName: "plus.rectangle.on.rectangle")
                 }
             }
         }
@@ -139,7 +77,7 @@ struct DashboardView: View {
             WindowPickerView()
                 .environmentObject(windowManager)
         }
-        .navigationTitle("AgentHub")
+        .navigationTitle("Canopy")
     }
 
     private var emptyState: some View {
@@ -152,7 +90,7 @@ struct DashboardView: View {
                 .font(.title2)
                 .foregroundStyle(.secondary)
 
-            Text("Add AI agent windows to send commands via voice or text")
+            Text("Add code editors and terminals to monitor your AI agents")
                 .font(.body)
                 .foregroundStyle(.tertiary)
 
@@ -171,7 +109,6 @@ struct DashboardView: View {
 
     private func promptBanner(_ prompt: RemoteControlService.PromptInfo) -> some View {
         HStack(spacing: 12) {
-            // Project badge
             if let cwd = prompt.cwd {
                 let project = URL(fileURLWithPath: cwd).lastPathComponent
                 HStack(spacing: 4) {
@@ -202,17 +139,17 @@ struct DashboardView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.green)
-            .controlSize(.regular)
+            .controlSize(.small)
 
             Button("Deny") {
                 windowManager.rcService.respondToPrompt(allow: false)
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
-            .controlSize(.regular)
+            .controlSize(.small)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .background(.orange.opacity(0.08))
         .overlay(
             Rectangle().frame(height: 1).foregroundStyle(.orange.opacity(0.3)),
@@ -223,8 +160,7 @@ struct DashboardView: View {
     // MARK: - Command Bar
 
     private var commandBar: some View {
-        HStack(spacing: 10) {
-            // Target window indicator
+        HStack(spacing: 8) {
             if let window = selectedWindow ?? windowManager.monitoredWindows.first,
                let icon = window.icon {
                 Image(nsImage: icon).resizable().frame(width: 16, height: 16)
@@ -239,10 +175,10 @@ struct DashboardView: View {
 
             Button("Send") { sendCommand() }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.small)
                 .disabled(commandText.trimmingCharacters(in: .whitespaces).isEmpty)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(8)
         .background(.bar)
     }
 
@@ -280,21 +216,5 @@ struct DashboardView: View {
             $0.bundleIdentifier == window.bundleIdentifier ||
             $0.localizedName == window.ownerName
         }?.processIdentifier
-    }
-
-    private var gridColumnControl: some View {
-        HStack(spacing: 4) {
-            Text("Grid:")
-                .foregroundStyle(.secondary)
-                .font(.caption)
-            Picker("Columns", selection: $windowManager.gridColumns) {
-                Text("1").tag(1)
-                Text("2").tag(2)
-                Text("3").tag(3)
-                Text("4").tag(4)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 140)
-        }
     }
 }

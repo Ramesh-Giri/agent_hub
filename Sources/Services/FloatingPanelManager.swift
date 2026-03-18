@@ -41,6 +41,8 @@ final class FloatingPanelManager: NSObject, ObservableObject, NSWindowDelegate {
         resignTask = Task {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, !NSApp.isActive, !self.isTransitioning else { return }
+            // Don't show floating panel if user hasn't added any windows
+            guard let wm = self.windowManager, !wm.monitoredWindows.isEmpty else { return }
             self.showPanel()
             self.hideMainWindows()
         }
