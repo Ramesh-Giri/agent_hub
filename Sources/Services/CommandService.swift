@@ -2,8 +2,8 @@ import Foundation
 import AppKit
 
 /// Sends commands to Claude Code terminals via VS Code REST Control extension.
-/// Uses `workbench.action.terminal.sendSequence` — writes directly to the terminal PTY.
-/// Raises the target window first for multi-window targeting.
+/// Maps each project to the correct REST Control port by tracing:
+/// project name → Claude PID (by CWD) → parent PID → extension host PID → listening port
 @MainActor
 final class CommandService {
 
@@ -12,78 +12,170 @@ final class CommandService {
         case failed(reason: String)
     }
 
-    private static var cachedPort: Int?
+    /// Cached project → port mappings
+    private static var portMap: [String: Int] = [:]
 
     // MARK: - Public API
 
-    /// Send text to a VS Code terminal window.
-    /// Raises the correct window, then sends via REST Control extension.
     static func sendText(_ text: String, to window: MonitoredWindow) async -> SendResult {
-        log("sendText: '\(text)' to \(window.windowTitle) (owner: \(window.ownerName))")
-
         let project = extractProject(from: window)
+        log("sendText: '\(text)' to \(project)")
 
-        // Raise the correct window so sendSequence targets its terminal
-        WindowInteractionService.raiseByProjectName(
-            project, windowID: window.id, ownerName: window.ownerName
-        )
-        try? await Task.sleep(for: .milliseconds(400))
-
-        // Find the REST Control port (cached after first discovery)
-        guard let port = await findRestPort() else {
-            return .failed(reason: "VS Code REST Control not found. Install extension: dpar39.vscode-rest-control")
+        // Get the port for this project (cached or discovered)
+        let port: Int
+        if let cached = portMap[project.lowercased()] {
+            port = cached
+        } else if let discovered = await discoverPort(for: project) {
+            portMap[project.lowercased()] = discovered
+            port = discovered
+        } else {
+            return .failed(reason: "Can't find REST Control port for '\(project)'. Is VS Code REST Control extension installed?")
         }
 
-        // Focus the terminal in the raised window — this ensures sendSequence targets it
-        await restFocusTerminal(port: port)
-        try? await Task.sleep(for: .milliseconds(200))
-
-        // Send via REST Control
+        // Send
         if await restSend(text, port: port) {
-            log("Sent via REST Control port \(port) to \(project)")
-            return .sent(method: "rest:\(port)")
+            log("Sent to \(project) on port \(port)")
+            return .sent(method: "port:\(port)")
         }
 
-        // Port might have changed — retry with fresh discovery
-        cachedPort = nil
-        if let newPort = await findRestPort(), await restSend(text, port: newPort) {
-            log("Sent via REST Control port \(newPort) to \(project) (retry)")
-            return .sent(method: "rest:\(newPort)")
-        }
-
-        return .failed(reason: "Failed to send to '\(project)'. Check VS Code REST Control extension.")
-    }
-
-    // MARK: - REST Control
-
-    /// Discover the REST Control port by testing ports directly with URLSession.
-    /// No lsof, no shell — just HTTP requests.
-    private static func findRestPort() async -> Int? {
-        if let cached = cachedPort { return cached }
-
-        // Scan a range of likely ports — REST Control defaults + common high ports
-        // Test them all concurrently for speed
-        let candidates = [39733, 57037, 37100, 37101, 49539, 49782, 39734, 39735]
-
-        for port in candidates {
-            if await testPort(port) {
-                cachedPort = port
-                log("Found REST Control on port \(port)")
-                return port
+        // Port might have changed — retry
+        portMap.removeValue(forKey: project.lowercased())
+        if let newPort = await discoverPort(for: project) {
+            portMap[project.lowercased()] = newPort
+            if await restSend(text, port: newPort) {
+                log("Sent to \(project) on port \(newPort) (retry)")
+                return .sent(method: "port:\(newPort)")
             }
         }
 
+        return .failed(reason: "Failed to send to '\(project)'")
+    }
+
+    static func resetPorts() { portMap.removeAll() }
+
+    // MARK: - Port Discovery via PID Chain
+
+    /// Discover the REST Control port for a project:
+    /// project → Claude PID (by CWD) → parent PID → extension host PID group → listening port
+    private static func discoverPort(for project: String) async -> Int? {
+        // Step 1-3 on background thread (shell commands)
+        let candidates = await withCheckedContinuation { (cont: CheckedContinuation<[Int], Never>) in
+            DispatchQueue.global().async {
+                cont.resume(returning: findCandidatePorts(for: project))
+            }
+        }
+
+        // Step 4: test candidates with URLSession (async, no blocking)
+        for port in candidates {
+            if await testPortAsync(port) {
+                log("Verified REST Control on port \(port) for \(project)")
+                return port
+            }
+        }
         return nil
     }
 
-    /// Test if a port is a REST Control endpoint using a harmless read-only command
-    private static func testPort(_ port: Int) async -> Bool {
+    /// Find candidate REST Control ports for a project by PID chain.
+    /// Returns ports belonging to the extension host PID group closest to Claude's parent.
+    private nonisolated static func findCandidatePorts(for project: String) -> [Int] {
+        guard let claudePID = findClaudePID(for: project) else {
+            log("No Claude process found for: \(project)")
+            return []
+        }
+        guard let parentPID = getParentPID(claudePID) else {
+            log("Can't get parent PID for Claude \(claudePID)")
+            return []
+        }
+        log("Claude PID \(claudePID), parent: \(parentPID)")
+
+        let allPorts = findExtensionHostPorts()
+
+        // Group ports by PID
+        var portsByPID: [pid_t: [Int]] = [:]
+        for (pid, port) in allPorts {
+            portsByPID[pid, default: []].append(port)
+        }
+
+        // Find PID closest to parent
+        var bestPID: pid_t?
+        var bestDistance = Int.max
+        for pid in portsByPID.keys {
+            let distance = abs(Int(pid) - Int(parentPID))
+            if distance < bestDistance {
+                bestDistance = distance
+                bestPID = pid
+            }
+        }
+
+        guard let targetPID = bestPID, let ports = portsByPID[targetPID] else { return [] }
+        log("Target PID \(targetPID) (distance \(bestDistance)), candidate ports: \(ports)")
+        return ports
+    }
+
+    /// Find Claude process PID by matching CWD to project name
+    private nonisolated static func findClaudePID(for project: String) -> pid_t? {
+        guard let output = runShell("/bin/ps", args: ["-eo", "pid,tty,comm"]) else { return nil }
+
+        var claudePIDs: [pid_t] = []
+        for line in output.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasSuffix("claude") && trimmed.contains("tty") {
+                let parts = trimmed.split(separator: " ", maxSplits: 1)
+                if let pid = pid_t(parts.first ?? "") {
+                    claudePIDs.append(pid)
+                }
+            }
+        }
+
+        for pid in claudePIDs {
+            if let lsofOutput = runShell("/usr/sbin/lsof", args: ["-p", "\(pid)"]) {
+                for line in lsofOutput.components(separatedBy: "\n") {
+                    if line.contains("cwd") && line.lowercased().contains(project.lowercased()) {
+                        return pid
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Get parent PID of a process
+    private nonisolated static func getParentPID(_ pid: pid_t) -> pid_t? {
+        guard let output = runShell("/bin/ps", args: ["-p", "\(pid)", "-o", "ppid="]) else { return nil }
+        return pid_t(output.trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Find all VS Code extension host PIDs and their REST Control listening ports
+    private nonisolated static func findExtensionHostPorts() -> [(pid: pid_t, port: Int)] {
+        guard let output = runShell("/usr/sbin/lsof", args: ["-iTCP", "-sTCP:LISTEN", "-P", "-n"]) else { return [] }
+
+        var results: [(pid: pid_t, port: Int)] = []
+        var seenPorts: Set<Int> = []
+
+        for line in output.components(separatedBy: "\n") {
+            guard line.contains("Code") else { continue }
+            // Extract PID (second field)
+            let fields = line.split(separator: " ", maxSplits: 10)
+            guard fields.count >= 9,
+                  let pid = pid_t(fields[1]) else { continue }
+            // Extract port from address field (e.g., "127.0.0.1:39733")
+            let addrField = String(fields[8])
+            guard let colonIdx = addrField.lastIndex(of: ":") else { continue }
+            let portStr = addrField[addrField.index(after: colonIdx)...]
+            guard let port = Int(portStr), port > 30000, !seenPorts.contains(port) else { continue }
+            seenPorts.insert(port)
+            results.append((pid: pid, port: port))
+        }
+        return results
+    }
+
+    /// Test if a port responds to REST Control (async, URLSession, no blocking)
+    private static func testPortAsync(_ port: Int) async -> Bool {
         guard let url = URL(string: "http://localhost:\(port)") else { return false }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 0.3
-        // Use a harmless command that doesn't trigger any dialog
+        req.timeoutInterval = 0.5
         req.httpBody = #"{"command":"workbench.action.terminal.focus"}"#.data(using: .utf8)
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
@@ -93,18 +185,8 @@ final class CommandService {
         } catch { return false }
     }
 
-    /// Focus the terminal panel in the currently active VS Code window
-    private static func restFocusTerminal(port: Int) async {
-        guard let url = URL(string: "http://localhost:\(port)") else { return }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 1
-        req.httpBody = #"{"command":"workbench.action.terminal.focus"}"#.data(using: .utf8)
-        _ = try? await URLSession.shared.data(for: req)
-    }
+    // MARK: - REST Control API
 
-    /// Send text to VS Code terminal via REST Control
     private static func restSend(_ text: String, port: Int) async -> Bool {
         guard let url = URL(string: "http://localhost:\(port)") else { return false }
         var req = URLRequest(url: url)
@@ -121,8 +203,8 @@ final class CommandService {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            let body = String(data: data, encoding: .utf8) ?? ""
-            return status == 200 && !body.contains("stack")
+            let respBody = String(data: data, encoding: .utf8) ?? ""
+            return status == 200 && !respBody.contains("stack")
         } catch { return false }
     }
 
@@ -136,7 +218,7 @@ final class CommandService {
         return title
     }
 
-    private static func log(_ msg: String) {
+    private nonisolated static func log(_ msg: String) {
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
         let path = "/tmp/canopy-debug.log"
         if let fh = FileHandle(forWritingAtPath: path) {
