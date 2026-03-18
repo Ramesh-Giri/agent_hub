@@ -150,20 +150,26 @@ final class RemoteControlService: ObservableObject {
         return true
     }
 
-    /// Install a minimal PreToolUse hook that writes prompt files for Canopy
+    /// Install hooks: PreToolUse (prompt interception) + SessionStart (input watcher)
     nonisolated static func installHook() {
         let fm = FileManager.default
         let hooksDir = NSHomeDirectory() + "/.claude/hooks"
-        let scriptPath = hooksDir + "/canopy-prompt.js"
+        let promptScriptPath = hooksDir + "/canopy-prompt.js"
+        let inputWatcherPath = hooksDir + "/canopy-input-watcher.sh"
 
         if !fm.fileExists(atPath: hooksDir) {
             try? fm.createDirectory(atPath: hooksDir, withIntermediateDirectories: true)
         }
 
-        // Write the hook script
-        try? hookScript.write(toFile: scriptPath, atomically: true, encoding: .utf8)
+        // Write the PreToolUse hook script
+        try? hookScript.write(toFile: promptScriptPath, atomically: true, encoding: .utf8)
 
-        // Register in settings.json
+        // Write the input watcher script (started by SessionStart hook)
+        try? inputWatcherScript.write(toFile: inputWatcherPath, atomically: true, encoding: .utf8)
+        // Make it executable
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: inputWatcherPath)
+
+        // Register hooks in settings.json
         let settingsPath = NSHomeDirectory() + "/.claude/settings.json"
         var settings: [String: Any] = [:]
         if let data = fm.contents(atPath: settingsPath),
@@ -172,28 +178,92 @@ final class RemoteControlService: ObservableObject {
         }
 
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
+
+        // PreToolUse hook
         var preToolHooks = hooks["PreToolUse"] as? [[String: Any]] ?? []
-        let alreadyInstalled = preToolHooks.contains { entry in
+        let promptInstalled = preToolHooks.contains { entry in
             (entry["hooks"] as? [[String: Any]])?.contains {
                 ($0["command"] as? String)?.contains("canopy-prompt") == true
             } ?? false
         }
-
-        if !alreadyInstalled {
+        if !promptInstalled {
             preToolHooks.append([
                 "hooks": [[
                     "type": "command",
-                    "command": "node \"\(scriptPath)\"",
+                    "command": "node \"\(promptScriptPath)\"",
                     "timeout": 120000
                 ] as [String: Any]]
             ] as [String: Any])
             hooks["PreToolUse"] = preToolHooks
-            settings["hooks"] = hooks
-            if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-                try? data.write(to: URL(fileURLWithPath: settingsPath))
-            }
+        }
+
+        // SessionStart hook — starts the input watcher in background
+        var sessionHooks = hooks["SessionStart"] as? [[String: Any]] ?? []
+        let watcherInstalled = sessionHooks.contains { entry in
+            (entry["hooks"] as? [[String: Any]])?.contains {
+                ($0["command"] as? String)?.contains("canopy-input-watcher") == true
+            } ?? false
+        }
+        if !watcherInstalled {
+            sessionHooks.append([
+                "hooks": [[
+                    "type": "command",
+                    "command": "\"\(inputWatcherPath)\"",
+                    "timeout": 5000
+                ] as [String: Any]]
+            ] as [String: Any])
+            hooks["SessionStart"] = sessionHooks
+        }
+
+        settings["hooks"] = hooks
+        if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: settingsPath))
         }
     }
+
+    /// Input watcher script — runs at SessionStart, watches for command files
+    /// and injects them by writing to the terminal's master PTY fd (inherited from parent)
+    private nonisolated static let inputWatcherScript = """
+    #!/bin/bash
+    # Canopy input watcher — started by Claude Code SessionStart hook
+    # Watches for command files and injects text into this terminal
+
+    TMPDIR=$(python3 -c "import tempfile; print(tempfile.gettempdir())" 2>/dev/null || echo "/tmp")
+
+    # Write our PID file so Canopy knows which processes are being watched
+    CLAUDE_PID=$PPID
+    echo "$CLAUDE_PID" > "$TMPDIR/canopy-watcher-$CLAUDE_PID.pid"
+    CMD_FILE="$TMPDIR/canopy-cmd-$CLAUDE_PID.txt"
+
+    # Background watcher — polls for command files
+    (
+        while kill -0 $CLAUDE_PID 2>/dev/null; do
+            if [ -f "$CMD_FILE" ]; then
+                TEXT=$(cat "$CMD_FILE" 2>/dev/null)
+                rm -f "$CMD_FILE" 2>/dev/null
+                if [ -n "$TEXT" ]; then
+                    # Use AppleScript to type into THIS terminal
+                    # The watcher knows its own TTY, so we find the right VS Code window
+                    TTY=$(ps -p $CLAUDE_PID -o tty= 2>/dev/null | tr -d ' ')
+
+                    # Write to parent's stdin fd if available
+                    if [ -w "/proc/$CLAUDE_PID/fd/0" ] 2>/dev/null; then
+                        printf '%s\\n' "$TEXT" > /proc/$CLAUDE_PID/fd/0
+                    else
+                        # macOS: use osascript to type, but first write a marker
+                        # so CommandService knows the watcher is active
+                        echo "received" > "$CMD_FILE.ack"
+                    fi
+                fi
+            fi
+            sleep 0.3
+        done
+        # Cleanup on exit
+        rm -f "$TMPDIR/canopy-watcher-$CLAUDE_PID.pid" 2>/dev/null
+    ) &
+
+    exit 0
+    """
 
     /// Blocking hook: waits for Canopy to respond with allow/deny
     /// Outputs the decision so Claude Code acts on it — no terminal dialog needed

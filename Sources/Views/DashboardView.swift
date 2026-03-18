@@ -73,21 +73,10 @@ struct DashboardView: View {
         .background(Color(.windowBackgroundColor))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 8) {
-                    if CommandService.isTmuxAvailable {
-                        Button {
-                            launchAgentSession()
-                        } label: {
-                            Label("Launch Agent", systemImage: "terminal")
-                        }
-                        .help("Launch Claude Code in a tmux session")
-                    }
-
-                    Button {
-                        showingWindowPicker = true
-                    } label: {
-                        Label("Add Windows", systemImage: "plus.rectangle.on.rectangle")
-                    }
+                Button {
+                    showingWindowPicker = true
+                } label: {
+                    Label("Add Windows", systemImage: "plus.rectangle.on.rectangle")
                 }
             }
         }
@@ -198,27 +187,6 @@ struct DashboardView: View {
         }
         .padding(8)
         .background(.bar)
-    }
-
-    private func launchAgentSession() {
-        // Open a folder picker to select project directory
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = "Select a project folder to launch Claude Code in"
-        panel.prompt = "Launch Agent"
-
-        if panel.runModal() == .OK, let url = panel.url {
-            if let sessionName = CommandService.launchClaudeInTmux(projectPath: url.path) {
-                // Auto-discover the new terminal window after a delay
-                Task {
-                    try? await Task.sleep(for: .seconds(2))
-                    await windowManager.autoDiscoverAgentWindows()
-                }
-                _ = sessionName
-            }
-        }
     }
 
     private func sendCommand() {
