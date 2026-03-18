@@ -237,9 +237,29 @@ struct CompactDashboardView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            // Double-tap: expand to main Canopy window with this window focused
-            selectedWindowID = window.id
-            onExpand()
+            // Directly activate the target app and raise its window
+            if let app = NSWorkspace.shared.runningApplications.first(where: {
+                $0.localizedName == window.ownerName || $0.bundleIdentifier == window.bundleIdentifier
+            }) {
+                // Raise the specific window first
+                let axApp = AXUIElementCreateApplication(app.processIdentifier)
+                var windowsRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+                   let axWindows = windowsRef as? [AXUIElement] {
+                    for axWindow in axWindows {
+                        var titleRef: CFTypeRef?
+                        AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef)
+                        if let axTitle = titleRef as? String,
+                           axTitle.localizedCaseInsensitiveContains(window.windowTitle.components(separatedBy: " — ").last ?? window.windowTitle) {
+                            AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+                            AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+                            break
+                        }
+                    }
+                }
+                // Force activate regardless of current app
+                app.activate(options: .activateIgnoringOtherApps)
+            }
         }
         .onTapGesture(count: 1) {
             selectedWindowID = window.id

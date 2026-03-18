@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 
 /// Watches for Claude Code permission prompts via a lightweight hook.
-/// The hook writes prompt info to /tmp, this service reads it and publishes to UI.
+/// The hook writes prompt info to ~/Library/Application Support/Canopy/ipc, this service reads it and publishes to UI.
 @MainActor
 final class RemoteControlService: ObservableObject {
     @Published var isConnected = false
@@ -48,7 +48,8 @@ final class RemoteControlService: ObservableObject {
     /// Write presence marker so the hook starts intercepting background prompts
     func activateHook() {
         FileManager.default.createFile(
-            atPath: Self.promptDir + "/canopy-active", contents: nil
+            atPath: Self.promptDir + "/canopy-active", contents: nil,
+            attributes: [.posixPermissions: 0o600]
         )
     }
 
@@ -63,7 +64,8 @@ final class RemoteControlService: ObservableObject {
         let responsePath = Self.promptDir + "/canopy-response-" + prompt.id + ".json"
         let response: [String: Any] = ["allow": allow]
         if let data = try? JSONSerialization.data(withJSONObject: response) {
-            try? data.write(to: URL(fileURLWithPath: responsePath))
+            FileManager.default.createFile(atPath: responsePath, contents: data,
+                                           attributes: [.posixPermissions: 0o600])
         }
         activePrompt = nil
     }
@@ -322,7 +324,7 @@ final class RemoteControlService: ObservableObject {
       const responseFile = ipcDir + '/canopy-response-' + uuid + '.json';
       data._cwd = process.cwd();
       data._uuid = uuid;
-      fs.writeFileSync(promptFile, JSON.stringify(data, null, 2));
+      fs.writeFileSync(promptFile, JSON.stringify(data, null, 2), { mode: 0o600 });
 
       const start = Date.now();
       const poll = () => {

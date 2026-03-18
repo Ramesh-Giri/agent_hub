@@ -19,7 +19,6 @@ final class CommandService {
 
     static func sendText(_ text: String, to window: MonitoredWindow) async -> SendResult {
         let project = extractProject(from: window)
-        log("sendText: '\(text)' to \(project)")
 
         // Get the port for this project (cached or discovered)
         let port: Int
@@ -34,7 +33,6 @@ final class CommandService {
 
         // Send
         if await restSend(text, port: port) {
-            log("Sent to \(project) on port \(port)")
             return .sent(method: "port:\(port)")
         }
 
@@ -43,7 +41,6 @@ final class CommandService {
         if let newPort = await discoverPort(for: project) {
             portMap[project.lowercased()] = newPort
             if await restSend(text, port: newPort) {
-                log("Sent to \(project) on port \(newPort) (retry)")
                 return .sent(method: "port:\(newPort)")
             }
         }
@@ -68,7 +65,6 @@ final class CommandService {
         // Step 4: test candidates with URLSession (async, no blocking)
         for port in candidates {
             if await testPortAsync(port) {
-                log("Verified REST Control on port \(port) for \(project)")
                 return port
             }
         }
@@ -79,14 +75,11 @@ final class CommandService {
     /// Returns ports belonging to the extension host PID group closest to Claude's parent.
     private nonisolated static func findCandidatePorts(for project: String) -> [Int] {
         guard let claudePID = findClaudePID(for: project) else {
-            log("No Claude process found for: \(project)")
             return []
         }
         guard let parentPID = getParentPID(claudePID) else {
-            log("Can't get parent PID for Claude \(claudePID)")
             return []
         }
-        log("Claude PID \(claudePID), parent: \(parentPID)")
 
         let allPorts = findExtensionHostPorts()
 
@@ -108,7 +101,6 @@ final class CommandService {
         }
 
         guard let targetPID = bestPID, let ports = portsByPID[targetPID] else { return [] }
-        log("Target PID \(targetPID) (distance \(bestDistance)), candidate ports: \(ports)")
         return ports
     }
 
@@ -216,18 +208,6 @@ final class CommandService {
             return String(title[dash.upperBound...])
         }
         return title
-    }
-
-    private nonisolated static func log(_ msg: String) {
-        let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
-        let path = "/tmp/canopy-debug.log"
-        if let fh = FileHandle(forWritingAtPath: path) {
-            fh.seekToEndOfFile()
-            fh.write(line.data(using: .utf8) ?? Data())
-            fh.closeFile()
-        } else {
-            FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
-        }
     }
 
     @discardableResult
