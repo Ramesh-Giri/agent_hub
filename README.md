@@ -133,7 +133,7 @@ AgentHub/
 - **Swift 5.9** / SwiftUI / AppKit — zero external dependencies
 - **SQLite3** (system library) — for claude-mem integration
 - **Accessibility API** (`AXUIElement`) — window raising, frontmost detection
-- **CGEvent** — keystroke injection for command sending
+- **VS Code REST Control** — terminal command sending via HTTP (`terminal.sendSequence`)
 - **CGWindowListCopyWindowInfo** — window discovery and screenshots
 
 ## Development
@@ -154,8 +154,20 @@ pkill -x Canopy; sleep 0.5 && ./build-and-run.sh
 
 No tests or linting configured. No external dependencies — pure Swift Package Manager.
 
+## Command Sending
+
+Canopy sends commands to VS Code terminals via the **REST Control extension** (`dpar39.vscode-rest-control`). This uses VS Code's `workbench.action.terminal.sendSequence` to write directly to the terminal PTY — no clipboard, no keystrokes, no focus stealing.
+
+**Multi-window targeting** works via PID-chain discovery:
+1. Find the Claude process whose CWD matches the target project
+2. Trace to its parent PID (VS Code pty helper)
+3. Find the nearest extension host PID
+4. Look up which REST Control port that extension host serves
+5. Send to that specific port
+
+**Setup:** Install the VS Code extension: `code --install-extension dpar39.vscode-rest-control` and reload VS Code.
+
 ## Known Issues
 
-1. **CGEvent multi-window targeting** — When multiple VS Code windows share the same PID, commands may go to the wrong window. AXRaise + multi-signal approach helps but has timing edge cases.
-2. **Hook allow-rule matching** — Simple glob matching can't fully replicate Claude Code's permission logic. Some auto-allowed tools may still trigger the hook.
-3. **Command sending uses clipboard paste** — Saves/restores clipboard, but briefly clobbers it. Future versions will use tmux or Claude Code's stdin pipe for direct communication.
+1. **Hook allow-rule matching** — Simple glob matching can't fully replicate Claude Code's permission logic. Some auto-allowed tools may still trigger the hook.
+2. **REST Control extension required** — Command sending requires the `dpar39.vscode-rest-control` VS Code extension to be installed and active.

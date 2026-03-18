@@ -119,11 +119,6 @@ final class WindowManager: ObservableObject {
         interactionService.bringToFront(windowID: window.id, ownerName: window.ownerName)
     }
 
-    func sendTextToWindow(_ window: MonitoredWindow, text: String) {
-        attentionService.clearAttention(windowID: window.id)
-        interactionService.sendText(text, toWindowID: window.id, ownerName: window.ownerName)
-    }
-
     // MARK: - Monitoring
 
     private func startTitleMonitoring() {

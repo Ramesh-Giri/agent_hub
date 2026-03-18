@@ -146,72 +146,7 @@ final class WindowInteractionService {
         return false
     }
 
-    /// Raise window with verify-and-retry loop (200ms intervals, max attempts).
-    /// Faster than fixed 0.7s wait when it works first try, more reliable when timing is bad.
-    static func raiseAndVerify(
-        projectName: String,
-        windowID: CGWindowID? = nil,
-        ownerName: String,
-        attempts: Int = 3,
-        completion: @escaping (Bool) -> Void
-    ) {
-        let axWindow = raiseByProjectName(projectName, windowID: windowID, ownerName: ownerName)
-
-        retryVerification(
-            projectName: projectName,
-            axWindow: axWindow,
-            ownerName: ownerName,
-            attempts: attempts,
-            completion: completion
-        )
-    }
-
-    private static func retryVerification(
-        projectName: String,
-        axWindow: AXUIElement?,
-        ownerName: String,
-        attempts: Int,
-        completion: @escaping (Bool) -> Void
-    ) {
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
-            if verifyFrontWindow(contains: projectName) {
-                completion(true)
-                return
-            }
-            guard attempts > 1 else {
-                completion(false)
-                return
-            }
-
-            // Retry raise
-            if let axWindow {
-                if let app = NSWorkspace.shared.runningApplications.first(where: {
-                    $0.localizedName == ownerName
-                }) {
-                    raiseWithMultiSignal(axWindow: axWindow, app: app)
-                }
-            } else {
-                _ = raiseByProjectName(projectName, ownerName: ownerName)
-            }
-
-            retryVerification(
-                projectName: projectName,
-                axWindow: axWindow,
-                ownerName: ownerName,
-                attempts: attempts - 1,
-                completion: completion
-            )
-        }
-    }
-
-    /// Send text + Return to a window via CGEvent keystroke injection.
-    func sendText(_ text: String, toWindowID windowID: CGWindowID, ownerName: String) {
-        bringToFront(windowID: windowID, ownerName: ownerName)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            Self.postKeystrokes(text)
-            Self.postReturn()
-        }
-    }
+    // CGEvent keystroke methods kept for potential future use but not actively called
 
     private static func postKeystrokes(_ text: String) {
         let source = CGEventSource(stateID: .hidSystemState)

@@ -61,7 +61,6 @@ struct PanelTextField: NSViewRepresentable {
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                NSLog("[Canopy] Enter key pressed, calling onSubmit")
                 onSubmit()
                 clearField()
                 return true
@@ -77,49 +76,5 @@ struct PanelTextField: NSViewRepresentable {
         @objc func handleClear() {
             clearField()
         }
-    }
-}
-
-/// Native NSButton that works in NSPanel — compact send button
-struct PanelSendButton: NSViewRepresentable {
-    let title: String
-    let action: () -> Void
-
-    func makeNSView(context: Context) -> NSButton {
-        let button = SendButton(title: title, target: context.coordinator, action: #selector(Coordinator.clicked))
-        button.bezelStyle = .rounded
-        button.contentTintColor = .white
-        button.wantsLayer = true
-        button.layer?.backgroundColor = NSColor.systemBlue.cgColor
-        button.layer?.cornerRadius = 6
-        button.isBordered = false
-        button.font = .systemFont(ofSize: 12, weight: .semibold)
-        button.setContentHuggingPriority(.required, for: .horizontal)
-        button.setContentCompressionResistancePriority(.required, for: .horizontal)
-        return button
-    }
-
-    func updateNSView(_ nsView: NSButton, context: Context) {
-        context.coordinator.action = action
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
-    }
-
-    class Coordinator: NSObject {
-        var action: () -> Void
-        init(action: @escaping () -> Void) { self.action = action }
-        @objc func clicked() { action() }
-    }
-}
-
-/// NSButton subclass that accepts first mouse in non-activating panels
-class SendButton: NSButton {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) {
-        NSLog("[Canopy] SendButton clicked")
-        window?.makeKey()
-        super.mouseDown(with: event)
     }
 }

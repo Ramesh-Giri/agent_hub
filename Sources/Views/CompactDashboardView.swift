@@ -140,7 +140,7 @@ struct CompactDashboardView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .background(Color.black)
-        .onAppear { }
+        .onAppear { /* windows added manually by user */ }
     }
 
     // MARK: - Top Bar
@@ -316,14 +316,16 @@ struct CompactDashboardView: View {
                 )
                 .frame(maxWidth: .infinity)
 
-                Text("Send")
+                Text(targetHasActivePrompt ? "Blocked" : "Send")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 60, height: 28)
-                    .background(isSending ? .gray : .blue)
+                    .frame(width: 66, height: 28)
+                    .background(targetHasActivePrompt ? .orange : (isSending ? .gray : .blue))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .contentShape(Rectangle())
-                    .onTapGesture { sendMessage() }
+                    .onTapGesture {
+                        if !targetHasActivePrompt { sendMessage() }
+                    }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 8)
@@ -335,6 +337,12 @@ struct CompactDashboardView: View {
     private var commandTarget: MonitoredWindow? {
         if let id = selectedWindowID, let w = visibleWindows.first(where: { $0.id == id }) { return w }
         return visibleWindows.first ?? windowManager.monitoredWindows.first
+    }
+
+    /// True if the current command target has an active permission prompt (blocked — can't send)
+    private var targetHasActivePrompt: Bool {
+        guard let target = commandTarget, let prompt = hookPrompt else { return false }
+        return promptMatchesWindow(prompt, window: target)
     }
 
     @State private var isSending = false
