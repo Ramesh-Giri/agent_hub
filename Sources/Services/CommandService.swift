@@ -23,16 +23,20 @@ final class CommandService {
 
         let project = extractProject(from: window)
 
-        // Raise the correct window so sendSequence targets it
+        // Raise the correct window so sendSequence targets its terminal
         WindowInteractionService.raiseByProjectName(
             project, windowID: window.id, ownerName: window.ownerName
         )
-        try? await Task.sleep(for: .milliseconds(500))
+        try? await Task.sleep(for: .milliseconds(400))
 
         // Find the REST Control port (cached after first discovery)
         guard let port = await findRestPort() else {
             return .failed(reason: "VS Code REST Control not found. Install extension: dpar39.vscode-rest-control")
         }
+
+        // Focus the terminal in the raised window — this ensures sendSequence targets it
+        await restFocusTerminal(port: port)
+        try? await Task.sleep(for: .milliseconds(200))
 
         // Send via REST Control
         if await restSend(text, port: port) {
@@ -87,6 +91,17 @@ final class CommandService {
             let body = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return status == 200 && (body == "null" || body.isEmpty)
         } catch { return false }
+    }
+
+    /// Focus the terminal panel in the currently active VS Code window
+    private static func restFocusTerminal(port: Int) async {
+        guard let url = URL(string: "http://localhost:\(port)") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 1
+        req.httpBody = #"{"command":"workbench.action.terminal.focus"}"#.data(using: .utf8)
+        _ = try? await URLSession.shared.data(for: req)
     }
 
     /// Send text to VS Code terminal via REST Control
