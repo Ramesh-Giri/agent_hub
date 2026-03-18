@@ -298,25 +298,36 @@ struct CompactDashboardView: View {
     // MARK: - Input Bar
 
     private var inputBar: some View {
-        HStack(spacing: 8) {
-            PanelTextField(
-                placeholder: "Message...",
-                text: $messageText,
-                onSubmit: { sendMessage() }
-            )
-            .frame(maxWidth: .infinity)
+        VStack(spacing: 0) {
+            if let error = sendError {
+                Text(error)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.orange.opacity(0.1))
+            }
+            HStack(spacing: 8) {
+                PanelTextField(
+                    placeholder: "Message...",
+                    text: $messageText,
+                    onSubmit: { sendMessage() }
+                )
+                .frame(maxWidth: .infinity)
 
-            Text("Send")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 60, height: 28)
-                .background(.blue)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .contentShape(Rectangle())
-                .onTapGesture { sendMessage() }
+                Text("Send")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 60, height: 28)
+                    .background(isSending ? .gray : .blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
+                    .onTapGesture { sendMessage() }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 8)
         .background(Color(white: 0.1))
     }
 
@@ -327,38 +338,37 @@ struct CompactDashboardView: View {
     }
 
     @State private var isSending = false
+    @State private var sendError: String?
 
     private func sendMessage() {
         let text = messageText.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return }
-        // Prevent double-sends — only one send at a time
-        guard !isSending else { return }
-
-        // Snapshot the target NOW before anything changes
         guard let target = commandTarget else { return }
-        let targetID = target.id
-        let targetTitle = target.windowTitle
-        let targetOwner = target.ownerName
+        // Don't block on isSending — let it queue
 
-        // Clear immediately and lock
-        messageText = ""
-        isSending = true
-        NotificationCenter.default.post(name: .init("CanopyClearInput"), object: nil)
-
-        // Create a frozen copy of the window to send to
         let frozenWindow = MonitoredWindow(
-            id: targetID,
-            ownerName: targetOwner,
-            windowTitle: targetTitle,
+            id: target.id,
+            ownerName: target.ownerName,
+            windowTitle: target.windowTitle,
             bundleIdentifier: target.bundleIdentifier,
             icon: target.icon
         )
 
+        messageText = ""
+        sendError = nil
+        NotificationCenter.default.post(name: .init("CanopyClearInput"), object: nil)
+
         Task {
-            await CommandService.sendText(text, to: frozenWindow)
-            // Wait a bit before unlocking to prevent rapid re-fires
-            try? await Task.sleep(for: .seconds(1))
-            isSending = false
+            let result = await CommandService.sendText(text, to: frozenWindow)
+            switch result {
+            case .sent:
+                sendError = nil
+            case .failed(let reason):
+                sendError = reason
+                // Clear error after 4s
+                try? await Task.sleep(for: .seconds(4))
+                sendError = nil
+            }
         }
     }
 
