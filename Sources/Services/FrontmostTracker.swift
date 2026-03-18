@@ -11,7 +11,14 @@ final class FrontmostTracker: ObservableObject {
 
     private var axObservers: [pid_t: AXObserver] = [:]
     private var pollTask: Task<Void, Never>?
-    private let filePath = FileManager.default.temporaryDirectory.path + "/canopy-frontmost.txt"
+    private let filePath: String = {
+        let dir = NSHomeDirectory() + "/Library/Application Support/Canopy/ipc"
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dir) {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        }
+        return dir + "/canopy-frontmost.txt"
+    }()
 
     func start() {
         // Layer 1: App activation changes

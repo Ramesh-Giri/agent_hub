@@ -237,7 +237,9 @@ struct CompactDashboardView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            windowManager.bringWindowToFront(window)
+            // Double-tap: expand to main Canopy window with this window focused
+            selectedWindowID = window.id
+            onExpand()
         }
         .onTapGesture(count: 1) {
             selectedWindowID = window.id

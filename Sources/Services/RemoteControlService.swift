@@ -20,7 +20,14 @@ final class RemoteControlService: ObservableObject {
         static func == (lhs: PromptInfo, rhs: PromptInfo) -> Bool { lhs.id == rhs.id }
     }
 
-    private static let promptDir = FileManager.default.temporaryDirectory.path
+    private static let promptDir: String = {
+        let dir = NSHomeDirectory() + "/Library/Application Support/Canopy/ipc"
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dir) {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        }
+        return dir
+    }()
     private static let promptPrefix = "canopy-prompt-"
 
     func start() {
@@ -78,7 +85,6 @@ final class RemoteControlService: ObservableObject {
 
         // If Canopy main window is active, auto-allow any prompts that slip through
         // (the hook should have passed them through, but stale files may exist)
-        let canopyIsActive = NSApp.isActive
 
         for file in files where file.hasPrefix(Self.promptPrefix) && file.hasSuffix(".json") {
             let uuid = String(file.dropFirst(Self.promptPrefix.count).dropLast(".json".count))
@@ -201,11 +207,10 @@ final class RemoteControlService: ObservableObject {
     const fs = require('fs');
     const crypto = require('crypto');
     const path = require('path');
-    const os = require('os');
-    const tmpDir = os.tmpdir();
+    const ipcDir = process.env.HOME + '/Library/Application Support/Canopy/ipc';
 
     try {
-      if (!fs.existsSync(tmpDir + '/canopy-active')) process.exit(0);
+      if (!fs.existsSync(ipcDir + '/canopy-active')) process.exit(0);
 
       const input = fs.readFileSync('/dev/stdin', 'utf8');
       if (!input.trim()) process.exit(0);
@@ -221,7 +226,7 @@ final class RemoteControlService: ObservableObject {
 
       // Don't block if user can see this project
       try {
-        const frontProject = fs.readFileSync(tmpDir + '/canopy-frontmost.txt', 'utf8').trim();
+        const frontProject = fs.readFileSync(ipcDir + '/canopy-frontmost.txt', 'utf8').trim();
         // Canopy main window is active — user sees all projects, pass through
         if (frontProject === '__CANOPY_ACTIVE__') process.exit(0);
         // Check if this project matches what the user is looking at
@@ -265,6 +270,17 @@ final class RemoteControlService: ObservableObject {
         allowRules = [...allowRules, ...(ups?.permissions?.allow || [])];
       } catch {}
 
+      function matchesCommand(command, pattern) {
+        if (!command) return false;
+        if (command === pattern) return true;
+        return command.startsWith(pattern) && ' \\t;|&'.includes(command[pattern.length]);
+      }
+      function matchesPath(fp, pattern) {
+        if (!fp) return false;
+        if (fp === pattern) return true;
+        return fp.startsWith(pattern) && (pattern.endsWith('/') || fp[pattern.length] === '/');
+      }
+
       // Check allow rules — supports both "Tool" and "Tool(pattern)" formats
       for (const r of allowRules) {
         if (typeof r !== 'string') continue;
@@ -277,10 +293,6 @@ final class RemoteControlService: ObservableObject {
         if (m && m[1] === tool) {
           const pattern = m[2];
 
-          // Direct substring match
-          if (cmd && cmd.includes(pattern)) process.exit(0);
-          if (filePath && filePath.includes(pattern)) process.exit(0);
-
           // Glob-style match: convert * to .* for regex
           if (pattern.includes('*')) {
             try {
@@ -291,23 +303,23 @@ final class RemoteControlService: ObservableObject {
             } catch {}
           }
 
-          // Path prefix match: "Edit(/Users/x/project)" matches files under that dir
-          if (filePath && filePath.startsWith(pattern)) process.exit(0);
-          if (cmd && cmd.startsWith(pattern)) process.exit(0);
+          // Boundary-aware matching for commands and paths
+          if (matchesCommand(cmd, pattern)) process.exit(0);
+          if (matchesPath(filePath, pattern)) process.exit(0);
         }
 
         // Legacy format: "Tool:pattern"
         if (r.startsWith(tool + ':')) {
           const p = r.slice(tool.length + 1);
-          if (cmd && cmd.includes(p)) process.exit(0);
-          if (filePath && filePath.includes(p)) process.exit(0);
+          if (matchesCommand(cmd, p)) process.exit(0);
+          if (matchesPath(filePath, p)) process.exit(0);
         }
       }
 
       // This tool needs permission — block and wait for Canopy
       const uuid = crypto.randomUUID();
-      const promptFile = tmpDir + '/canopy-prompt-' + uuid + '.json';
-      const responseFile = tmpDir + '/canopy-response-' + uuid + '.json';
+      const promptFile = ipcDir + '/canopy-prompt-' + uuid + '.json';
+      const responseFile = ipcDir + '/canopy-response-' + uuid + '.json';
       data._cwd = process.cwd();
       data._uuid = uuid;
       fs.writeFileSync(promptFile, JSON.stringify(data, null, 2));
