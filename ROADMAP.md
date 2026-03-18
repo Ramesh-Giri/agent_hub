@@ -55,7 +55,31 @@
 - Network.framework for Bonjour discovery
 - URLSessionWebSocketTask for real-time communication
 
-## v1.4 — Multi-Agent Orchestration
+## v1.4 — Multi-Agent Collaboration
+
+### Agent-to-Agent Communication
+- [ ] Select any two (or more) Claude instances and pair them
+- [ ] Real-time message relay: A's response → B's input → B's response → A's input
+- [ ] Shared context: both agents can see each other's conversation history
+- [ ] Debate mode: two agents argue opposing approaches, user picks winner
+- [ ] Code review loop: Agent A writes code, Agent B reviews, A fixes, B approves
+- [ ] Research → Implement: Agent A researches (web search, docs), Agent B implements based on findings
+- [ ] Test → Fix cycle: Agent A runs tests, Agent B fixes failures, loop until green
+
+### Cross-Project Collaboration
+- [ ] Agent in Project A can reference code/files from Project B
+- [ ] Shared clipboard between agent sessions
+- [ ] Cross-project dependency awareness (monorepo support)
+- [ ] Agent A in backend repo talks to Agent B in frontend repo
+
+### Human-in-the-Loop Controls
+- [ ] Approve/reject before forwarding between agents
+- [ ] Edit the message before it's forwarded
+- [ ] Pause/resume the collaboration loop
+- [ ] Cost budget per collaboration session
+- [ ] Max turns before requiring human approval
+
+## v1.5 — Multi-Agent Orchestration
 
 ### Workflow Engine
 - [ ] Define agent workflows (A → B → C pipelines)
