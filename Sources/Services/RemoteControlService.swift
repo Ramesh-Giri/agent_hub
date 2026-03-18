@@ -220,20 +220,27 @@ final class RemoteControlService: ObservableObject {
       const tool = data.tool_name || '';
       if (!['Bash', 'Write', 'Edit'].includes(tool)) process.exit(0);
 
-      // If Canopy app is in the foreground, don't block — user can see all prompts in Canopy's UI
-      // If this project is the one user is looking at, don't block — let Claude Code show its own dialog
+      // Don't block if user can see this project
       try {
         const frontProject = fs.readFileSync(tmpDir + '/canopy-frontmost.txt', 'utf8').trim();
-        // Canopy main window is active — pass through everything
+        // Canopy main window is active — user sees all projects, pass through
         if (frontProject === '__CANOPY_ACTIVE__') process.exit(0);
+        // Check if this project matches what the user is looking at
         const fp = frontProject.toLowerCase();
         const cwd = process.cwd().toLowerCase();
-        if (fp && cwd.includes(fp)) process.exit(0);
-        const segments = cwd.split('/');
-        for (const seg of segments) {
-          if (seg && fp && seg === fp) process.exit(0);
+        const cwdParts = cwd.split('/').filter(Boolean);
+        // Match if frontmost name appears in any CWD segment
+        if (fp) {
+          for (const seg of cwdParts) {
+            if (seg === fp || seg.includes(fp) || fp.includes(seg)) process.exit(0);
+          }
+          // Also match full path containment
+          if (cwd.includes(fp)) process.exit(0);
         }
-      } catch {}
+      } catch {
+        // Can't read frontmost file — pass through to be safe
+        process.exit(0);
+      }
 
       // Check if already allowed by settings
       const home = process.env.HOME;

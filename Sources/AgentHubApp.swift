@@ -6,6 +6,8 @@ struct CanopyApp: App {
     @State private var showPermissionSetup = false
     private let floatingPanel = FloatingPanelManager()
 
+    @AppStorage("hasShownPermissionSetup") private var hasShownPermissionSetup = false
+
     var body: some Scene {
         WindowGroup {
             DashboardView()
@@ -14,10 +16,13 @@ struct CanopyApp: App {
                 .task {
                     windowManager.setup()
                     floatingPanel.setup(windowManager: windowManager)
-                    if !CGPreflightScreenCaptureAccess() || !AXIsProcessTrusted() {
-                        showPermissionSetup = true
+                    // Only show permission dialog on first ever launch
+                    if !hasShownPermissionSetup {
+                        if !CGPreflightScreenCaptureAccess() || !AXIsProcessTrusted() {
+                            showPermissionSetup = true
+                            hasShownPermissionSetup = true
+                        }
                     }
-                    // Clean up presence file on quit so hooks fall through to normal Claude Code
                     NotificationCenter.default.addObserver(
                         forName: NSApplication.willTerminateNotification,
                         object: nil, queue: .main

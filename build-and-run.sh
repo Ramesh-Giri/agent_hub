@@ -5,11 +5,15 @@ APP_NAME="Canopy"
 BUILD_DIR=".build/debug"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 INSTALL_PATH="/Applications/$APP_NAME.app"
-# Find the best available code signing identity (prefer Apple Development, fall back to self-signed)
+# Find the best available code signing identity.
+# Use SHA-1 hash to avoid "ambiguous" errors when multiple certs have the same name.
+CERT_SHA=""
 CERT_NAME=""
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Apple Development"; then
+    CERT_SHA=$(security find-identity -v -p codesigning 2>/dev/null | grep "Apple Development" | head -1 | awk '{print $2}')
     CERT_NAME=$(security find-identity -v -p codesigning 2>/dev/null | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')
 elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Canopy Dev\|AgentHub Dev"; then
+    CERT_SHA=$(security find-identity -v -p codesigning 2>/dev/null | grep "Canopy Dev\|AgentHub Dev" | head -1 | awk '{print $2}')
     CERT_NAME=$(security find-identity -v -p codesigning 2>/dev/null | grep "Canopy Dev\|AgentHub Dev" | head -1 | sed 's/.*"\(.*\)"/\1/')
 fi
 
@@ -57,9 +61,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 PLIST
 
 # Sign the app bundle
-if [ -n "$CERT_NAME" ]; then
+if [ -n "$CERT_SHA" ]; then
     echo "Signing with '$CERT_NAME' (stable identity)..."
-    codesign --force --deep --sign "$CERT_NAME" --identifier "com.techkreator.Canopy" "$APP_BUNDLE"
+    codesign --force --deep --sign "$CERT_SHA" --identifier "com.techkreator.Canopy" "$APP_BUNDLE"
 else
     echo "Warning: No signing cert found, using ad-hoc (permissions won't persist across rebuilds)"
     codesign --force --deep --sign - "$APP_BUNDLE"

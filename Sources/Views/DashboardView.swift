@@ -10,8 +10,15 @@ struct DashboardView: View {
         windowManager.attentionService.attentionWindows.count
     }
 
+    private var columnCount: Int {
+        let count = windowManager.monitoredWindows.count
+        if count <= 1 { return 1 }
+        if count <= 4 { return 2 }
+        return 3
+    }
+
     private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 8), count: windowManager.gridColumns)
+        Array(repeating: GridItem(.flexible(), spacing: 8), count: columnCount)
     }
 
     private var hookPrompt: RemoteControlService.PromptInfo? {
@@ -188,33 +195,8 @@ struct DashboardView: View {
         guard let window = selectedWindow ?? windowManager.monitoredWindows.first else { return }
         commandText = ""
 
-        let pid = findPID(for: window)
-        windowManager.bringWindowToFront(window)
-
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-            let utf16 = Array(text.utf16)
-            for i in stride(from: 0, to: utf16.count, by: 20) {
-                let end = min(i + 20, utf16.count)
-                var chunk = Array(utf16[i..<end])
-                let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: true)
-                down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
-                if let pid { down?.postToPid(pid) } else { down?.post(tap: .cghidEventTap) }
-                let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x31, keyDown: false)
-                if let pid { up?.postToPid(pid) } else { up?.post(tap: .cghidEventTap) }
-                Thread.sleep(forTimeInterval: 0.005)
-            }
-            Thread.sleep(forTimeInterval: 0.02)
-            let enterDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: true)
-            if let pid { enterDown?.postToPid(pid) } else { enterDown?.post(tap: .cghidEventTap) }
-            let enterUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x24, keyDown: false)
-            if let pid { enterUp?.postToPid(pid) } else { enterUp?.post(tap: .cghidEventTap) }
+        Task {
+            await CommandService.sendText(text, to: window)
         }
-    }
-
-    private func findPID(for window: MonitoredWindow) -> pid_t? {
-        NSWorkspace.shared.runningApplications.first {
-            $0.bundleIdentifier == window.bundleIdentifier ||
-            $0.localizedName == window.ownerName
-        }?.processIdentifier
     }
 }

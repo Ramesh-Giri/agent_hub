@@ -306,13 +306,14 @@ struct CompactDashboardView: View {
             )
             .frame(maxWidth: .infinity)
 
-            TapButton(
-                label: "Send",
-                action: { sendMessage() },
-                color: .white, bgColor: .blue,
-                font: .system(size: 13, weight: .semibold)
-            )
-            .frame(width: 60, height: 28)
+            Text("Send")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 60, height: 28)
+                .background(.blue)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+                .onTapGesture { sendMessage() }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
@@ -325,66 +326,39 @@ struct CompactDashboardView: View {
         return visibleWindows.first ?? windowManager.monitoredWindows.first
     }
 
+    @State private var isSending = false
+
     private func sendMessage() {
         let text = messageText.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else {
-            NSLog("[Canopy] Empty text, not sending")
-            return
-        }
-        guard let window = commandTarget else {
-            NSLog("[Canopy] No command target — no visible or monitored windows")
-            return
-        }
-        NSLog("[Canopy] Sending '%@' to: %@ — %@", text, window.ownerName, window.windowTitle)
-        NSLog("[Canopy] AX trusted: %d, window ID: %d", AXIsProcessTrusted() ? 1 : 0, window.id)
+        guard !text.isEmpty else { return }
+        // Prevent double-sends — only one send at a time
+        guard !isSending else { return }
+
+        // Snapshot the target NOW before anything changes
+        guard let target = commandTarget else { return }
+        let targetID = target.id
+        let targetTitle = target.windowTitle
+        let targetOwner = target.ownerName
+
+        // Clear immediately and lock
         messageText = ""
+        isSending = true
         NotificationCenter.default.post(name: .init("CanopyClearInput"), object: nil)
 
-        let title = window.windowTitle
-        let project: String
-        if let lastDash = title.range(of: " — ", options: .backwards) {
-            project = String(title[lastDash.upperBound...])
-        } else {
-            project = title
-        }
+        // Create a frozen copy of the window to send to
+        let frozenWindow = MonitoredWindow(
+            id: targetID,
+            ownerName: targetOwner,
+            windowTitle: targetTitle,
+            bundleIdentifier: target.bundleIdentifier,
+            icon: target.icon
+        )
 
-        // 1. Save clipboard
-        let pasteboard = NSPasteboard.general
-        let saved = pasteboard.string(forType: .string)
-
-        // 2. Set text on clipboard
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-
-        // 3. Raise with verify-and-retry
-        let windowID = window.id
-        let ownerName = window.ownerName
-        NSLog("[Canopy] Raising window: project=%@, windowID=%d, owner=%@", project, windowID, ownerName)
-        WindowInteractionService.raiseAndVerify(
-            projectName: project,
-            windowID: windowID,
-            ownerName: ownerName,
-            attempts: 3
-        ) { success in
-            NSLog("[Canopy] Raise result: %d, now pasting", success ? 1 : 0)
-            // 4. Paste + Enter
-            let src = CGEventSource(stateID: .hidSystemState)
-            let vDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
-            vDown?.flags = .maskCommand
-            vDown?.post(tap: .cghidEventTap)
-            CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)?.post(tap: .cghidEventTap)
-
-            Thread.sleep(forTimeInterval: 0.15)
-
-            CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: true)?.post(tap: .cghidEventTap)
-            CGEvent(keyboardEventSource: src, virtualKey: 0x24, keyDown: false)?.post(tap: .cghidEventTap)
-
-            // 5. Restore clipboard
-            Thread.sleep(forTimeInterval: 0.3)
-            DispatchQueue.main.async {
-                pasteboard.clearContents()
-                if let s = saved { pasteboard.setString(s, forType: .string) }
-            }
+        Task {
+            await CommandService.sendText(text, to: frozenWindow)
+            // Wait a bit before unlocking to prevent rapid re-fires
+            try? await Task.sleep(for: .seconds(1))
+            isSending = false
         }
     }
 
