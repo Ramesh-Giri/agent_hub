@@ -12,9 +12,9 @@ CERT_NAME=""
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Apple Development"; then
     CERT_SHA=$(security find-identity -v -p codesigning 2>/dev/null | grep "Apple Development" | head -1 | awk '{print $2}')
     CERT_NAME=$(security find-identity -v -p codesigning 2>/dev/null | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')
-elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Canopy Dev\|AgentHub Dev"; then
-    CERT_SHA=$(security find-identity -v -p codesigning 2>/dev/null | grep "Canopy Dev\|AgentHub Dev" | head -1 | awk '{print $2}')
-    CERT_NAME=$(security find-identity -v -p codesigning 2>/dev/null | grep "Canopy Dev\|AgentHub Dev" | head -1 | sed 's/.*"\(.*\)"/\1/')
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "Canopy Dev"; then
+    CERT_SHA=$(security find-identity -v -p codesigning 2>/dev/null | grep "Canopy Dev" | head -1 | awk '{print $2}')
+    CERT_NAME=$(security find-identity -v -p codesigning 2>/dev/null | grep "Canopy Dev" | head -1 | sed 's/.*"\(.*\)"/\1/')
 fi
 
 echo "Building $APP_NAME..."
@@ -26,6 +26,27 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+# Generate .icns from icon PNGs
+ICON_SRC="Sources/Resources/Assets.xcassets/AppIcon.appiconset"
+ICONSET="$BUILD_DIR/AppIcon.iconset"
+if [ -d "$ICON_SRC" ]; then
+    echo "Generating app icon..."
+    rm -rf "$ICONSET"
+    mkdir -p "$ICONSET"
+    cp "$ICON_SRC/icon_16x16.png"     "$ICONSET/icon_16x16.png"
+    cp "$ICON_SRC/icon_16x16@2x.png"  "$ICONSET/icon_16x16@2x.png"
+    cp "$ICON_SRC/icon_32x32.png"     "$ICONSET/icon_32x32.png"
+    cp "$ICON_SRC/icon_32x32@2x.png"  "$ICONSET/icon_32x32@2x.png"
+    cp "$ICON_SRC/icon_128x128.png"   "$ICONSET/icon_128x128.png"
+    cp "$ICON_SRC/icon_128x128@2x.png" "$ICONSET/icon_128x128@2x.png"
+    cp "$ICON_SRC/icon_256x256.png"   "$ICONSET/icon_256x256.png"
+    cp "$ICON_SRC/icon_256x256@2x.png" "$ICONSET/icon_256x256@2x.png"
+    cp "$ICON_SRC/icon_512x512.png"   "$ICONSET/icon_512x512.png"
+    cp "$ICON_SRC/icon_512x512@2x.png" "$ICONSET/icon_512x512@2x.png"
+    iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    rm -rf "$ICONSET"
+fi
 
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -54,6 +75,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>Canopy needs automation permission to interact with your AI agent windows.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

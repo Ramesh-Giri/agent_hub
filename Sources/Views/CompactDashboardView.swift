@@ -325,16 +325,16 @@ struct CompactDashboardView: View {
                 )
                 .frame(maxWidth: .infinity)
 
-                Text(targetHasActivePrompt ? "Blocked" : "Send")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 66, height: 28)
-                    .background(targetHasActivePrompt ? .orange : (isSending ? .gray : .blue))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
+                TapButton(
+                    label: targetHasActivePrompt ? "Blocked" : "Send",
+                    action: {
                         if !targetHasActivePrompt { sendMessage() }
-                    }
+                    },
+                    color: .white,
+                    bgColor: targetHasActivePrompt ? .orange : (isSending ? .gray : .blue),
+                    font: .system(size: 13, weight: .semibold)
+                )
+                .frame(width: 66, height: 28)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 8)
@@ -359,9 +359,9 @@ struct CompactDashboardView: View {
 
     private func sendMessage() {
         let text = messageText.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return }
-        guard let target = commandTarget else { return }
-        // Don't block on isSending — let it queue
+        guard !text.isEmpty else { print("[Canopy] sendMessage: text empty"); return }
+        guard let target = commandTarget else { print("[Canopy] sendMessage: no commandTarget"); return }
+        print("[Canopy] sendMessage: '\(text)' → \(target.ownerName) / \(target.windowTitle)")
 
         let frozenWindow = MonitoredWindow(
             id: target.id,
@@ -378,11 +378,12 @@ struct CompactDashboardView: View {
         Task {
             let result = await CommandService.sendText(text, to: frozenWindow)
             switch result {
-            case .sent:
+            case .sent(let method):
+                print("[Canopy] sendMessage: SUCCESS via \(method)")
                 sendError = nil
             case .failed(let reason):
+                print("[Canopy] sendMessage: FAILED — \(reason)")
                 sendError = reason
-                // Clear error after 4s
                 try? await Task.sleep(for: .seconds(4))
                 sendError = nil
             }

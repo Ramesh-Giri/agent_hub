@@ -1,6 +1,13 @@
 # Canopy — Agent OS
 
-A macOS app that acts as the operating system layer for your AI coding agents. Monitor multiple Claude Code sessions from a floating overlay, respond to permission prompts without switching windows, and send commands to background terminals.
+<p align="center">
+  <img src="Sources/Resources/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" width="128" height="128" alt="Canopy Logo">
+</p>
+
+<p align="center">
+  <strong>The operating system layer for your AI coding agents.</strong><br>
+  Monitor multiple Claude Code sessions from a floating overlay, respond to permission prompts without switching windows, and send commands to background terminals.
+</p>
 
 ## What It Does
 
@@ -8,7 +15,7 @@ When you run multiple AI coding agents across different projects, Canopy lets yo
 
 - **See all sessions at once** — Live screenshots in a floating panel, updated every 2 seconds
 - **Respond to permission prompts remotely** — Allow/Deny buttons appear when a background agent needs permission, without leaving your current work
-- **Send commands to background terminals** — Type in the floating panel, text goes to the correct terminal
+- **Send commands to background terminals** — Type in the floating panel, text goes to the correct terminal via VS Code REST Control
 - **Smart window filtering** — Only shows projects you're NOT looking at. When you switch to Chrome or another non-project app, all monitored projects become visible
 - **Navigate to any project** — Double-click a project card to switch to that specific VS Code window, even across multiple instances
 
@@ -26,7 +33,7 @@ When you run multiple AI coding agents across different projects, Canopy lets yo
 
 ```bash
 git clone <repo-url>
-cd AgentHub
+cd Canopy
 chmod +x build-and-run.sh
 
 # Build + install to /Applications (recommended — permissions persist)
@@ -39,7 +46,7 @@ chmod +x build-and-run.sh
 The build script will:
 1. Auto-detect your Apple Development certificate (or fall back to ad-hoc signing)
 2. Build via `swift build`
-3. Create a `.app` bundle with proper Info.plist
+3. Create a `.app` bundle with proper Info.plist and app icon
 4. Sign and launch
 
 ### Grant Permissions
@@ -54,6 +61,8 @@ You may need to relaunch after granting permissions.
 ### Add Windows
 
 Canopy starts with an empty dashboard. Click **Add Windows** (+ button in toolbar) to pick from discovered code editors, terminals, and AI tools.
+
+> **Note:** Windows on other macOS Spaces or minimized windows may not appear in the picker. Make them fullscreen or move them to the current Space, then hit Refresh.
 
 ## How It Works
 
@@ -83,7 +92,7 @@ Appears automatically when you switch away from Canopy. Shows:
 - Adaptive grid of background windows (horizontal/vertical based on panel shape)
 - All windows when you're on a non-project app (Chrome, Finder, etc.)
 - Permission prompt banner with project badge
-- Command input bar
+- Command input bar (uses gesture-based controls for reliable NSPanel interaction)
 - Minimize to pill / expand to full app
 
 ### Frontmost Detection
@@ -97,9 +106,9 @@ Event-driven tracking using:
 ## Project Structure
 
 ```
-AgentHub/
+Canopy/
 ├── Sources/
-│   ├── AgentHubApp.swift                  # App entry (@main)
+│   ├── CanopyApp.swift                    # App entry (@main)
 │   ├── Models/
 │   │   ├── WindowManager.swift            # Central state manager
 │   │   ├── MonitoredWindow.swift          # Window data model
@@ -113,19 +122,22 @@ AgentHub/
 │   │   ├── WindowPickerView.swift         # Window selection sheet
 │   │   ├── SettingsView.swift             # App settings
 │   │   └── PermissionSetupView.swift      # First-run permission guide
-│   └── Services/
-│       ├── RemoteControlService.swift     # Hook install, prompt IPC
-│       ├── FrontmostTracker.swift         # Event-driven frontmost detection
-│       ├── WindowDiscoveryService.swift   # CGWindowList discovery
-│       ├── WindowInteractionService.swift # AXUIElement + CGEvent
-│       ├── AttentionDetectionService.swift # Title/idle detection
-│       ├── FloatingPanelManager.swift     # NSPanel lifecycle
-│       ├── ContentSharingManager.swift    # Screenshot capture
-│       └── ClaudeMemService.swift         # Context from claude-mem (optional)
+│   ├── Services/
+│   │   ├── RemoteControlService.swift     # Hook install, prompt IPC
+│   │   ├── FrontmostTracker.swift         # Event-driven frontmost detection
+│   │   ├── WindowDiscoveryService.swift   # CGWindowList discovery
+│   │   ├── WindowInteractionService.swift # AXUIElement + CGEvent
+│   │   ├── AttentionDetectionService.swift # Title/idle detection
+│   │   ├── FloatingPanelManager.swift     # NSPanel lifecycle
+│   │   ├── ContentSharingManager.swift    # Screenshot capture
+│   │   ├── CommandService.swift           # REST Control port discovery + send
+│   │   └── ClaudeMemService.swift         # Context from claude-mem (optional)
+│   └── Resources/
+│       └── Assets.xcassets/               # App icon assets
 ├── build-and-run.sh          # Build, sign, install, launch
 ├── Package.swift              # SPM config (zero external deps)
 ├── Info.plist                 # App metadata
-└── AgentHub.entitlements      # App sandbox disabled
+└── Canopy.entitlements         # App sandbox disabled
 ```
 
 ## Tech Stack
@@ -171,3 +183,4 @@ Canopy sends commands to VS Code terminals via the **REST Control extension** (`
 
 1. **Hook allow-rule matching** — Simple glob matching can't fully replicate Claude Code's permission logic. Some auto-allowed tools may still trigger the hook.
 2. **REST Control extension required** — Command sending requires the `dpar39.vscode-rest-control` VS Code extension to be installed and active.
+3. **VS Code windows may not appear in window picker** — `CGWindowListCopyWindowInfo` cannot always enumerate windows on other macOS Spaces or minimized windows. Make them fullscreen or move them to the current Space, then hit Refresh.
