@@ -16,6 +16,7 @@ struct WindowAttention: Identifiable {
         case errorDetected = "Error detected"
         case processIdle = "Process idle"
         case promptDetected = "Prompt waiting"
+        case responseComplete = "Response complete"
     }
 }
 
@@ -38,9 +39,14 @@ final class AttentionDetectionService: NSObject, ObservableObject, UNUserNotific
 
     private var previousTitles: [CGWindowID: String] = [:]
     private var unchangedFrameCount: [CGWindowID: Int] = [:]
+    private var changedFrameCount: [CGWindowID: Int] = [:]
     private var previousScreenshots: [CGWindowID: NSImage] = [:]
     private var lastNotificationTime: [CGWindowID: Date] = [:]
     private let notificationCooldown: TimeInterval = 30
+    /// Minimum frames of active change before we consider a "stop" as response complete
+    private let activeThreshold = 3
+    /// Frames of stability after activity to trigger responseComplete
+    private let stableThreshold = 3
 
     /// Patterns indicating the terminal is waiting for user input (title-based only)
     private static let inputPatterns: [String] = [
@@ -107,17 +113,31 @@ final class AttentionDetectionService: NSObject, ObservableObject, UNUserNotific
                 }
             }
 
-            // Screenshot idle detection (pure terminals only)
+            // Screenshot change detection
             if let currentShot = screenshots[windowID],
                let previousShot = previousScreenshots[windowID] {
                 if imagesAreSimilar(currentShot, previousShot) {
+                    // Screenshot stable
                     unchangedFrameCount[windowID, default: 0] += 1
+                    let wasActive = changedFrameCount[windowID, default: 0] >= activeThreshold
+
                     if unchangedFrameCount[windowID, default: 0] >= 10 && isPureTerminal {
                         flagAttention(windowID: windowID, reason: .processIdle, windowName: window.displayName, promptText: nil)
                     }
+
+                    // Response complete: was actively changing, now stable
+                    if wasActive && unchangedFrameCount[windowID, default: 0] >= stableThreshold {
+                        if attentionWindows[windowID]?.reason != .responseComplete {
+                            flagAttention(windowID: windowID, reason: .responseComplete, windowName: window.displayName, promptText: "Claude finished responding")
+                        }
+                        changedFrameCount[windowID] = 0
+                    }
                 } else {
+                    // Screenshot changed — activity in progress
+                    changedFrameCount[windowID, default: 0] += 1
                     unchangedFrameCount[windowID] = 0
-                    if attentionWindows[windowID]?.reason == .processIdle {
+                    if attentionWindows[windowID]?.reason == .processIdle ||
+                       attentionWindows[windowID]?.reason == .responseComplete {
                         clearAttention(windowID: windowID)
                     }
                 }
@@ -197,6 +217,7 @@ final class AttentionDetectionService: NSObject, ObservableObject, UNUserNotific
         previousTitles.removeValue(forKey: windowID)
         previousScreenshots.removeValue(forKey: windowID)
         unchangedFrameCount.removeValue(forKey: windowID)
+        changedFrameCount.removeValue(forKey: windowID)
         lastNotificationTime.removeValue(forKey: windowID)
         clearAttention(windowID: windowID)
     }

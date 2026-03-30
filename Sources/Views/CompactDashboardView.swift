@@ -196,6 +196,8 @@ struct CompactDashboardView: View {
     private func floatingWindowCard(_ window: MonitoredWindow) -> some View {
         let isPromptSource = promptMatchesWindow(hookPrompt, window: window)
         let isSelected = selectedWindowID == window.id
+        let attention = windowManager.attentionService.attentionWindows[window.id]
+        let isComplete = attention?.reason == .responseComplete
         return VStack(spacing: 0) {
             HStack(spacing: 4) {
                 if let icon = window.icon {
@@ -208,6 +210,16 @@ struct CompactDashboardView: View {
                 Spacer()
                 if isPromptSource {
                     Circle().fill(.orange).frame(width: 6, height: 6)
+                } else if isComplete {
+                    Text("Done")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.green)
+                        .clipShape(Capsule())
+                } else if attention != nil {
+                    Circle().fill(.yellow).frame(width: 6, height: 6)
                 }
             }
             .padding(.horizontal, 6)
@@ -231,12 +243,14 @@ struct CompactDashboardView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(
-                    isPromptSource ? .orange : (isSelected ? .blue.opacity(0.6) : .white.opacity(0.08)),
-                    lineWidth: isPromptSource ? 2 : (isSelected ? 1.5 : 1)
+                    isPromptSource ? .orange : (isComplete ? .green : (isSelected ? .blue.opacity(0.6) : .white.opacity(0.08))),
+                    lineWidth: isPromptSource ? 2 : (isComplete ? 2 : (isSelected ? 1.5 : 1))
                 )
         )
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
+            // Clear attention on navigate
+            windowManager.attentionService.clearAttention(windowID: window.id)
             // Switch to the target app window
             let project = CommandService.extractProject(from: window)
             WindowInteractionService.raiseByProjectName(
