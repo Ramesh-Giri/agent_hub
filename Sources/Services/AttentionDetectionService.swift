@@ -44,9 +44,9 @@ final class AttentionDetectionService: NSObject, ObservableObject, UNUserNotific
     private var lastNotificationTime: [CGWindowID: Date] = [:]
     private let notificationCooldown: TimeInterval = 30
     /// Minimum frames of active change before we consider a "stop" as response complete
-    private let activeThreshold = 3
+    private let activeThreshold = 2
     /// Frames of stability after activity to trigger responseComplete
-    private let stableThreshold = 3
+    private let stableThreshold = 2
 
     /// Patterns indicating the terminal is waiting for user input (title-based only)
     private static let inputPatterns: [String] = [
@@ -197,7 +197,8 @@ final class AttentionDetectionService: NSObject, ObservableObject, UNUserNotific
         let attention = WindowAttention(id: windowID, reason: reason, timestamp: Date(), promptText: promptText, contextLines: contextLines)
         attentionWindows[windowID] = attention
 
-        if notificationsEnabled {
+        // responseComplete shows on floating panel only, not as system notification
+        if notificationsEnabled && reason != .responseComplete {
             sendNotification(windowID: windowID, windowName: windowName, reason: reason, promptText: promptText)
         }
     }

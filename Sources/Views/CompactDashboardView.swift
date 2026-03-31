@@ -29,6 +29,13 @@ struct CompactDashboardView: View {
         return names.joined(separator: " · ")
     }
 
+    /// Windows that just finished responding
+    private var completedWindows: [MonitoredWindow] {
+        windowManager.monitoredWindows.filter {
+            windowManager.attentionService.attentionWindows[$0.id]?.reason == .responseComplete
+        }
+    }
+
     /// Show prompts only from BACKGROUND projects (frontmost project's hook doesn't block)
     private var hookPrompt: RemoteControlService.PromptInfo? {
         windowManager.rcService.activePrompt
@@ -81,6 +88,11 @@ struct CompactDashboardView: View {
                 // Permission prompt banner (top, full width — always visible)
                 if let prompt = hookPrompt {
                     promptBanner(prompt)
+                }
+
+                // Response complete banner
+                if !completedWindows.isEmpty {
+                    completionBanner
                 }
 
                 // Window grid
@@ -316,6 +328,42 @@ struct CompactDashboardView: View {
         .frame(maxWidth: .infinity)
         .background(.orange.opacity(0.15))
         .overlay(Rectangle().frame(height: 1).foregroundStyle(.orange.opacity(0.3)), alignment: .bottom)
+    }
+
+    // MARK: - Completion Banner
+
+    private var completionBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.system(size: 12))
+
+            let names = completedWindows.map(\.displayName).joined(separator: ", ")
+            Text(names)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+
+            Text("done")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.green)
+
+            Spacer()
+
+            TapIconButton(
+                systemName: "xmark",
+                action: {
+                    for w in completedWindows {
+                        windowManager.attentionService.clearAttention(windowID: w.id)
+                    }
+                },
+                color: .white.opacity(0.5)
+            )
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.green.opacity(0.12))
+        .overlay(Rectangle().frame(height: 1).foregroundStyle(.green.opacity(0.3)), alignment: .bottom)
     }
 
     // MARK: - Input Bar
